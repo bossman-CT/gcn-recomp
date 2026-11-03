@@ -159,7 +159,7 @@ static uint8_t axis_to_u8(int v, bool invert) {
 // share the pad with a headset's controllers (xr_desktop.cpp).
 static void merge_desktop_pad(PadState& p) {
     const uint8_t* k = SDL_GetKeyboardState(nullptr);
-    if (k[SDL_SCANCODE_RETURN]) p.buttons |= PAD_START;
+    if (k[SDL_SCANCODE_RETURN] && !(SDL_GetModState() & KMOD_ALT)) p.buttons |= PAD_START;  // Alt+Enter is fullscreen
     if (k[SDL_SCANCODE_X]) p.buttons |= PAD_A;
     if (k[SDL_SCANCODE_Z]) p.buttons |= PAD_B;
     if (k[SDL_SCANCODE_C]) p.buttons |= PAD_X;
@@ -219,12 +219,24 @@ static void update_pad() {
     pad_set_state(0, p);
 }
 
+static SDL_Window* g_win;
+
+// F11 or Alt+Enter: borderless fullscreen on the window's display, and back.
+static void toggle_fullscreen() {
+    const bool full = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+    SDL_SetWindowFullscreen(g_win, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+}
+
 // The window's events. False once the user has asked to quit.
 static bool pump_events() {
     SDL_Event e;
     bool running = true;
     while (SDL_PollEvent(&e)) {
         input_map_event(e);
+        if (e.type == SDL_KEYDOWN && !e.key.repeat && g_win &&
+            (e.key.keysym.scancode == SDL_SCANCODE_F11 ||
+             (e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))))
+            toggle_fullscreen();
         if (e.type == SDL_QUIT) running = false;
         // A device controls.txt binds is the file's alone.
         else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl && !input_map_binds_index(e.cdevice.which))
@@ -248,7 +260,7 @@ int main(int argc, char** argv) {
     if (!plat_readable(iso_default.c_str())) iso_default = plat_find_file("rom", ".iso");
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
-    bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false;
+    bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false, fullscreen = false;
     std::string input_log_dir, replay_dir;
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
@@ -280,6 +292,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--record-size=", 14)) sscanf(argv[i] + 14, "%dx%d", &record_w, &record_h);
         else if (!strcmp(argv[i], "--headless")) headless = true;
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
+        else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
@@ -358,8 +371,10 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_Window* win = SDL_CreateWindow(GCN_APP_LABEL, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        1280, 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
-                                       (hidden ? SDL_WINDOW_HIDDEN : 0));
+                                       (hidden ? SDL_WINDOW_HIDDEN : 0) |
+                                       (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) fatal("SDL_CreateWindow: %s", SDL_GetError());
+    g_win = win;
     // Ask for the newest core profile first: the renderer needs only GCN_GL_MAJOR.MINOR, but an
     // OpenXR runtime may want more of the context it shares (Meta's wants 4.0), and drivers
     // hand back exactly the version asked for.
