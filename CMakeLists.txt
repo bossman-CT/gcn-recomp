@@ -492,7 +492,9 @@ function(gcn_add_game)
   # compiles no more than the entry points again.
   set(GCN_GAME_DEFS
     GCN_GAME_TITLE="${G_TITLE}"
-    GCN_DISC_ID="${G_DISC_ID}")
+    GCN_DISC_ID="${G_DISC_ID}"
+    # Not about the game, but every target that compiles the runtime needs it.
+    GCN_DEFAULT_FONT_DIR="${GCN_RECOMP_DIR}/fonts")
   if(GCN_GUEST_CHECKS)
     list(APPEND GCN_GAME_DEFS GCN_GUEST_CHECKS)
   endif()

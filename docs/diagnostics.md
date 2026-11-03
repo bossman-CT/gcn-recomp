@@ -693,3 +693,12 @@ keeps the instruction it replaces -- the first instruction of `OSAllocFromHeap` 
 
 `HeapArray` is the small-data word `OSAllocFromHeap` loads first (`lwz r3, off(r13)`), and
 `r13` is set by `__start`. Without the hooks the panic report says the heaps were not traced.
+
+## System fonts
+
+The SDK's `OSInitFont` reads the console's two system fonts (ANSI and Shift-JIS) from the
+IPL ROM over EXI. The runtime serves replacements at the ROM offsets the loader reads:
+Dolphin's Yay0 fonts, generated from Droid Sans (Apache-2.0, `fonts/font-licenses.txt`),
+not Nintendo's. They load from `fonts/` in this repository, or from `GCN_FONT_DIR`. A
+missing or invalid file is logged under `--log=exi`, and the game's system text is then
+blank.

@@ -1,8 +1,12 @@
 // External Interface: IPL device (SRAM / RTC / UART). Memory cards: not present (yet).
 #include "../runtime.h"
 #include "../platform.h"
+#include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <memory>
+#include <string>
+#include <vector>
 #include "memcard.h"
 
 static std::unique_ptr<MemCard> g_card_a;
@@ -18,6 +22,27 @@ static uint32_t g_ipl_addr;
 static bool g_ipl_have_cmd;
 static uint32_t g_ipl_pos;
 static std::string g_uart_line;
+
+// The system fonts the SDK's OSInitFont reads from the IPL ROM, as Yay0-compressed images:
+// replacements (fonts/, from Dolphin) rather than Nintendo's, served at the ROM offsets the
+// font loader reads. GCN_FONT_DIR overrides where they are loaded from.
+#ifndef GCN_DEFAULT_FONT_DIR
+#define GCN_DEFAULT_FONT_DIR "fonts"
+#endif
+static constexpr uint32_t kRomFontSjis = 0x001AFF00, kRomFontAnsi = 0x001FCF00;
+static std::vector<uint8_t> g_font_sjis, g_font_ansi;
+
+static std::vector<uint8_t> load_rom_font(const char* name) {
+    const char* dir = getenv("GCN_FONT_DIR");
+    const std::string path = std::string(dir && *dir ? dir : GCN_DEFAULT_FONT_DIR) + "/" + name;
+    std::ifstream f(path, std::ios::binary);
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (data.size() < 4 || memcmp(data.data(), "Yay0", 4) != 0) {
+        LOG(LOG_EXI, "IPL font %s missing or not Yay0: system text will be blank", path.c_str());
+        return {};
+    }
+    return data;
+}
 
 static void sram_init() {
     memset(g_sram, 0, sizeof(g_sram));
@@ -73,9 +98,12 @@ static uint8_t ipl_transfer_byte(uint8_t in) {
                 g_uart_line.clear();
             } else if (in) g_uart_line.push_back((char)in);
         }
-    } else {
-        // ROM (font etc.) - not provided
-        if (g_ipl_pos == 0) LOG(LOG_EXI, "IPL ROM read at %08X (unsupported)", addr >> 6);
+    } else if (!write) {
+        // ROM, addressed in 64-byte units: the two fonts and nothing else.
+        const uint32_t rom = (addr >> 6) + g_ipl_pos;
+        if (rom >= kRomFontAnsi && rom - kRomFontAnsi < g_font_ansi.size()) out = g_font_ansi[rom - kRomFontAnsi];
+        else if (rom >= kRomFontSjis && rom - kRomFontSjis < g_font_sjis.size()) out = g_font_sjis[rom - kRomFontSjis];
+        else if (g_ipl_pos == 0) LOG(LOG_EXI, "IPL ROM read at %08X (unsupported)", addr >> 6);
     }
     g_ipl_pos++;
     return out;
@@ -142,6 +170,8 @@ const char* g_memcard_path;
 
 void exi_init() {
     sram_init();
+    g_font_ansi = load_rom_font("font_western.bin");
+    g_font_sjis = load_rom_font("font_japanese.bin");
     const std::string path = g_memcard_path ? std::string(g_memcard_path)
                            : g_save_dir ? std::string(g_save_dir) + "/memcard_a.raw"
                                         : std::string("saves/memcard_a.raw");
