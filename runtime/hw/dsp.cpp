@@ -2,6 +2,7 @@
 // (see dsp_hle.cpp) - this file only models the CPU-side registers.
 #include "../runtime.h"
 #include "dsp_hle.h"
+#include <cstdlib>
 #include <algorithm>
 #include <deque>
 #include <mutex>

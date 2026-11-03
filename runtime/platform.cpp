@@ -1,5 +1,6 @@
 // Host OS services: POSIX and Windows implementations of platform.h.
 #include "platform.h"
+#include <cstdlib>
 #include <cctype>
 #include <chrono>
 #include <ctime>

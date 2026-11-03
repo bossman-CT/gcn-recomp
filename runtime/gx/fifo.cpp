@@ -1,4 +1,5 @@
 // Command Processor / Pixel Engine registers, write-gather pipe and FIFO feeding.
+#include <cstdlib>
 #include <algorithm>
 #include "../runtime.h"
 #include "../platform.h"

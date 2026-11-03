@@ -1,5 +1,6 @@
 // Video Interface: retrace interrupts and framebuffer registers.
 #include "../runtime.h"
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 

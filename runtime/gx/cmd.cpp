@@ -2,6 +2,7 @@
 #include "../runtime.h"
 #include "gx.h"
 #include "texture.h"
+#include <cstdlib>
 #include <cmath>
 
 const char* func_name(uint32_t addr);

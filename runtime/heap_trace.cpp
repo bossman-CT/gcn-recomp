@@ -26,6 +26,7 @@
 // allocator's search loop can switch guest threads between entry and return, so the pending
 // request is keyed by the CPU making it.
 #include "runtime.h"
+#include <cstdlib>
 #include <algorithm>
 #include <tuple>
 #include <map>

@@ -3,6 +3,7 @@
 // writes the final 5ms stereo block that the AI DMA plays.
 #include "../runtime.h"
 #include "ax.h"
+#include <cstdlib>
 #include <algorithm>
 #include <initializer_list>
 #include <string>

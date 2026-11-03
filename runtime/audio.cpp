@@ -7,6 +7,7 @@
 // callback its API hands it.
 #include "runtime.h"
 #include "hw/dtk.h"
+#include <cstdlib>
 #include <algorithm>
 #include <mutex>
 #include <vector>

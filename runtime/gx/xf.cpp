@@ -5,6 +5,7 @@
 #include "gx.h"
 #include "render.h"
 #include "texture.h"
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <chrono>

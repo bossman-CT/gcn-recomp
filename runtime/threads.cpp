@@ -15,6 +15,7 @@
 #include "mmu.h"
 #include "platform.h"
 #include "input_log.h"
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>

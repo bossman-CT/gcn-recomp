@@ -1,5 +1,6 @@
 // GX texture decoding (all formats -> RGBA8), TLUT (palette) memory, and the
 // guest-side texture cache.
+#include <cstdlib>
 #include <algorithm>
 #include "../runtime.h"
 #include "gx.h"

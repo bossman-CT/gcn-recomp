@@ -16,6 +16,7 @@
 #include "gx/gl_msrtt.h"
 #include "hw/pad.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <chrono>
 #include <cmath>

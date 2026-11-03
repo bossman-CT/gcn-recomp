@@ -1,6 +1,7 @@
 // MMIO dispatch for 0xC8000000-0xCFFFFFFF (EFB + hardware registers) and the PI.
 #include "../runtime.h"
 #include "../platform.h"
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 
