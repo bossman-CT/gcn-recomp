@@ -6,7 +6,9 @@
 #include "render.h"
 #include "render_gl.h"
 #include "shadergen.h"
+#include "texcoord.h"
 #include "gl.h"
+#include <cstdlib>
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
@@ -78,12 +80,13 @@ struct UniformShadow {
     uint32_t screen_uv;
     float ripple[2];
     float tsz[16];
+    float coord_scale[16];
     uint32_t texsnap;
 };
 
 struct Program {
     GLuint prog;
-    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_indmtx, u_indscale,
+    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_texcoordscale, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogmode, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple, u_uvgrad;
     GLint u_points, u_point_off;
@@ -580,6 +583,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_reg = glGetUniformLocation(p, "u_reg");
     pr.u_kstage = glGetUniformLocation(p, "u_kstage");
     pr.u_texsize = glGetUniformLocation(p, "u_texsize");
+    pr.u_texcoordscale = glGetUniformLocation(p, "u_texcoordscale");
     pr.u_indmtx = glGetUniformLocation(p, "u_indmtx");
     pr.u_indscale = glGetUniformLocation(p, "u_indscale");
     pr.u_alpharef = glGetUniformLocation(p, "u_alpharef");
@@ -2342,6 +2346,16 @@ static void apply_state(const PixelState& st, int prim) {
         g_astat.tsz++;
         glUniform2fv(pr.u_texsize, 8, tsz);
         memcpy(u.tsz, tsz, sizeof(tsz));
+    }
+    // The scale belongs to the coordinate slot, whatever map it samples (texcoord.h).
+    float coord_scale[16];
+    for (int c = 0; c < 8; c++) {
+        coord_scale[c * 2] = gx::texcoord_scale(bp[0x30 + c * 2]);
+        coord_scale[c * 2 + 1] = gx::texcoord_scale(bp[0x31 + c * 2]);
+    }
+    if (!(held && memcmp(coord_scale, u.coord_scale, sizeof(coord_scale)) == 0)) {
+        glUniform2fv(pr.u_texcoordscale, 8, coord_scale);
+        memcpy(u.coord_scale, coord_scale, sizeof(coord_scale));
     }
     if (!(held && u.texsnap == texsnap)) {
         glUniform1i(pr.u_texsnap, (GLint)texsnap);

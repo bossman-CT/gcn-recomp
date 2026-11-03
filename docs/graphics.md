@@ -1033,3 +1033,14 @@ line of a buffer filled to the brim -- which a display list sized by a dry run i
 pointer came back to the base with its wrap bit set, `GXEndDisplayList` took that for an
 overflow and returned a size of zero, and every call of the list drew nothing.
 `cp_end_excl` in `gx/fifo.cpp` is the exclusive end the arithmetic uses.
+
+## Texture coordinate scale
+
+A texture coordinate's scale comes from its slot's `SU_SSIZE`/`SU_TSIZE` registers (BP
+0x30 + 2n and 0x31 + 2n, size minus one in the low 16 bits), not from the texture the stage
+samples. The SDK sets them to the image's size, so for most draws the two agree. A draw that
+submits pixel coordinates, such as a font atlas, sets them to 0: a one-texel scale. Scaling
+those by the image instead sends them far outside it, and the glyphs disappear.
+`u_texcoordscale[8]` carries the per-slot scale (`texcoord.h`). Regular and indirect stages
+use it; a stage whose coordinate an eye has moved into an EFB copy's screen space still
+scales by the copy.
