@@ -58,9 +58,12 @@ build contains nothing that knows how.
 The recompiler wraps the SDK's `OSLink`, `OSLinkFixed` and `OSUnlink` by name, so the
 DOL's symbols must name them. After a successful link, `rels_linked` (`runtime/rels.cpp`)
 reads where each section went from the module's header, which the link has made
-absolute, and records it in `g_rel_base`; before an unlink, `rels_unlinked` forgets it.
-`call_indirect` maps an address in a linked module's code -- a callback, a vtable entry --
-to the canonical one with `rels_canon`. Data the linker relocates is in guest memory as
+absolute, and records it in `g_rel_base`. An unlink forgets nothing: `OSUnlink` leaves the
+module's bytes in memory, as on the console, and a game may still call into them once more
+-- a callback an object of the module registered, run after the module was taken off the
+list -- so the code stays mapped until a later link overlaps its range, and the section
+bases stay until the module is linked again. `call_indirect` maps an address in a module's
+code -- a callback, a vtable entry -- to the canonical one with `rels_canon`. Data the linker relocates is in guest memory as
 the game linked it. `--log=os` prints each link and unlink.
 
 Nothing checks that a module's code is only entered while it is linked; the game cannot

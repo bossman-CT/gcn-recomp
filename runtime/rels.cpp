@@ -15,7 +15,8 @@
 //     which the function table and the module's jump tables are keyed by.
 //
 // The generated code calls rels_linked after every successful OSLink/OSLinkFixed and
-// rels_unlinked before every OSUnlink, so both stay exactly as the game's module list.
+// rels_unlinked before every OSUnlink. An unlinked module's code stays mapped until
+// something is linked over it, as its bytes stay in memory on the console.
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -47,6 +48,14 @@ void forget(uint32_t info) {
     int n = g_live_count.load(std::memory_order_acquire);
     for (int i = 0; i < n; i++)
         if (g_live[i].info == info) g_live[i].size = 0;
+}
+
+// A new section over [base, base + size) replaces whatever was mapped there, including the
+// code of a module unlinked earlier (rels_unlinked).
+void forget_overlapping(uint32_t base, uint32_t size) {
+    int n = g_live_count.load(std::memory_order_acquire);
+    for (int i = 0; i < n; i++)
+        if (g_live[i].size && base < g_live[i].base + g_live[i].size && g_live[i].base < base + size) g_live[i].size = 0;
 }
 
 // The module's file as it is before the link: header, section table, sections, import
@@ -142,6 +151,7 @@ void rels_linked(uint32_t info) {
         const uint32_t base = LD32(table + s.index * 8) & ~1u;
         g_rel_base[k * REL_MAX_SECTIONS + s.index] = base;
         if (!s.exec) continue;
+        forget_overlapping(base, s.size);
         int n = g_live_count.load(std::memory_order_relaxed);
         int slot = -1;
         for (int j = 0; j < n; j++)
@@ -163,13 +173,14 @@ void rels_linked(uint32_t info) {
     }
 }
 
+// OSUnlink takes a module off the OS's list and leaves its code and data in memory, as they
+// stay on the console until something else is put there. A game may still call into it --
+// a callback an object of the module registered, run once more after the unlink -- so its
+// code stays mapped, and its section bases stay, until a link overlaps the range
+// (forget_overlapping) or the module itself is linked again.
 void rels_unlinked(uint32_t info) {
     const int k = module_index(LD32(info));
-    forget(info);
-    if (k >= 0) {
-        for (uint32_t s = 0; s < REL_MAX_SECTIONS; s++) g_rel_base[k * REL_MAX_SECTIONS + s] = 0;
-        LOG(LOG_OS, "OSUnlink: %s at %08X\n", g_recomp_rels[k].name, info);
-    }
+    if (k >= 0) LOG(LOG_OS, "OSUnlink: %s at %08X\n", g_recomp_rels[k].name, info);
 }
 
 uint32_t rels_section_address(uint32_t module_id, uint32_t section) {
