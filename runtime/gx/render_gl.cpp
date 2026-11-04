@@ -81,12 +81,13 @@ struct UniformShadow {
     float ripple[2];
     float tsz[16];
     float coord_scale[16];
+    int tcbound;
     uint32_t texsnap;
 };
 
 struct Program {
     GLuint prog;
-    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_texcoordscale, u_indmtx, u_indscale,
+    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_texcoordscale, u_tcbound, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogmode, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple, u_uvgrad;
     GLint u_points, u_point_off;
@@ -584,6 +585,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_kstage = glGetUniformLocation(p, "u_kstage");
     pr.u_texsize = glGetUniformLocation(p, "u_texsize");
     pr.u_texcoordscale = glGetUniformLocation(p, "u_texcoordscale");
+    pr.u_tcbound = glGetUniformLocation(p, "u_tcbound");
     pr.u_indmtx = glGetUniformLocation(p, "u_indmtx");
     pr.u_indscale = glGetUniformLocation(p, "u_indscale");
     pr.u_alpharef = glGetUniformLocation(p, "u_alpharef");
@@ -2356,6 +2358,16 @@ static void apply_state(const PixelState& st, int prim) {
     if (!(held && memcmp(coord_scale, u.coord_scale, sizeof(coord_scale)) == 0)) {
         glUniform2fv(pr.u_texcoordscale, 8, coord_scale);
         memcpy(u.coord_scale, coord_scale, sizeof(coord_scale));
+    }
+    // GCN_TEXCOORD_SCALE=texture scales every coordinate by its stage's bound texture, as before
+    // the SU scale: for comparing a draw both ways (docs/graphics.md, "Texture coordinate scale").
+    static const int tcbound = [] {
+        const char* v = getenv("GCN_TEXCOORD_SCALE");
+        return v && !strcmp(v, "texture") ? 1 : 0;
+    }();
+    if (!(held && u.tcbound == tcbound)) {
+        glUniform1i(pr.u_tcbound, tcbound);
+        u.tcbound = tcbound;
     }
     if (!(held && u.texsnap == texsnap)) {
         glUniform1i(pr.u_texsnap, (GLint)texsnap);

@@ -1044,3 +1044,5 @@ those by the image instead sends them far outside it, and the glyphs disappear.
 `u_texcoordscale[8]` carries the per-slot scale (`texcoord.h`). Regular and indirect stages
 use it; a stage whose coordinate an eye has moved into an EFB copy's screen space still
 scales by the copy.
+`GCN_TEXCOORD_SCALE=texture` brings back the old scaling, by each stage's bound texture, for
+comparing a scene both ways.
