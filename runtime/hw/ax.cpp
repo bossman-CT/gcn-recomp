@@ -1,6 +1,7 @@
-// High-level emulation of the AX audio ucode (the "old" 2001 GameCube variant):
-// processes the command lists the AX library sends, mixes voices from ARAM and
-// writes the final 5ms stereo block that the AI DMA plays.
+// High-level emulation of the GameCube AX audio ucode: processes the command lists the
+// AX library sends, mixes voices from ARAM and writes the final 5ms stereo block that
+// the AI DMA plays. The command set is the one every GameCube build shares; the voices'
+// mixer control word comes in two forms, picked by the ucode's fingerprint at boot.
 #include "../runtime.h"
 #include "ax.h"
 #include <cstdlib>
@@ -16,6 +17,16 @@ constexpr int SPF = 5 * SPMS;     // samples per 5ms frame
 int32_t g_left[SPF], g_right[SPF], g_surround[SPF];
 int32_t g_auxa_l[SPF], g_auxa_r[SPF], g_auxa_s[SPF];
 int32_t g_auxb_l[SPF], g_auxb_r[SPF], g_auxb_s[SPF];
+
+// A voice's outputs, in the order of their (volume, delta) pairs in the PB's mixer.
+enum { OUT_L, OUT_R, OUT_AUXA_L, OUT_AUXA_R, OUT_AUXB_L, OUT_AUXB_R, OUT_AUXB_S, OUT_S, OUT_AUXA_S, OUT_COUNT };
+int32_t* const g_out[OUT_COUNT] = {g_left, g_right, g_auxa_l, g_auxa_r, g_auxb_l, g_auxb_r, g_auxb_s, g_surround, g_auxa_s};
+
+// Fingerprints (dsp_hle.cpp's ucode_hash) of the builds whose mixer control is the
+// compact 2001 form. Every other build has a bit per output, which is how Dolphin's AX
+// HLE reads all but this one too.
+constexpr uint32_t kCompactMixerHashes[] = {0x4E8A8B21};
+bool g_compact_mixer;
 
 // ---- parameter block (word indices into the big-endian u16 array) ----
 enum {
@@ -127,6 +138,56 @@ void mix_add(int32_t* out, const int16_t* in, int n, PB& pb, int vol_idx, bool r
     pb.w[vol_idx] = vol;
 }
 
+// Which outputs a voice mixes into, and which of those ramp their volume: bit n is OUT_n.
+struct Routing { uint16_t on = 0, ramp = 0; };
+
+Routing decode_mixer_control(uint16_t mc) {
+    Routing r;
+    auto route = [&r](int out, bool on, bool ramp) {
+        if (!on) return;
+        r.on |= 1u << out;
+        if (ramp) r.ramp |= 1u << out;
+    };
+    if (g_compact_mixer) {
+        // Compact form: main L/R always; bit0 AuxA, bit1 AuxB, bit2 surround, bit3 ramps
+        // every output. Bit4 selects Dolby Pro Logic II mixing, where the low bits mean
+        // something else.
+        bool ramp = mc & 8;
+        bool auxa, auxb, surround;
+        if (mc & 0x10) {
+            auxb = (mc & 6) == 0;
+            auxa = (mc & 7) == 1;
+            surround = false;
+        } else {
+            auxa = mc & 1;
+            auxb = mc & 2;
+            surround = mc & 4;
+        }
+        route(OUT_L, true, ramp);
+        route(OUT_R, true, ramp);
+        route(OUT_AUXA_L, auxa, ramp);
+        route(OUT_AUXA_R, auxa, ramp);
+        route(OUT_AUXA_S, auxa && ((mc & 0x10) || surround), ramp);
+        route(OUT_AUXB_L, auxb, ramp);
+        route(OUT_AUXB_R, auxb, ramp);
+        route(OUT_AUXB_S, auxb && surround, ramp);
+        route(OUT_S, surround, ramp);
+    } else {
+        // A bit per output, and a ramp bit per group of them. 0x4000 marks a Dolby Pro
+        // Logic II voice; the outputs it names are mixed the same way.
+        route(OUT_L, mc & 0x0001, mc & 0x0008);
+        route(OUT_R, mc & 0x0002, mc & 0x0008);
+        route(OUT_S, mc & 0x0004, mc & 0x0008);
+        route(OUT_AUXA_L, mc & 0x0010, mc & 0x0040);
+        route(OUT_AUXA_R, mc & 0x0020, mc & 0x0040);
+        route(OUT_AUXA_S, mc & 0x0080, mc & 0x0100);
+        route(OUT_AUXB_L, mc & 0x0200, mc & 0x0800);
+        route(OUT_AUXB_R, mc & 0x0400, mc & 0x0800);
+        route(OUT_AUXB_S, mc & 0x1000, mc & 0x2000);
+    }
+    return r;
+}
+
 extern int g_stat_voices;
 void process_voice(PB& pb, int offset) {
     if (!pb.w[PB_RUNNING]) return;
@@ -157,37 +218,9 @@ void process_voice(PB& pb, int offset) {
         samples[i] = (int16_t)std::clamp(((int32_t)samples[i] * v) >> 15, -32767, 32767);
         pb.w[PB_VOL] = (uint16_t)(v + (int16_t)pb.w[PB_VOL_DELTA]);
     }
-    // Old (2001) ucode mixer control: main L/R always; bit0 AuxA, bit1 AuxB,
-    // bit2 surround, bit3 volume ramps. Bit4 selects Dolby Pro Logic II mixing, where
-    // the low bits mean something else.
-    uint16_t mc = pb.w[PB_MIXER_CONTROL];
-    bool ramp = mc & 8;
-    bool auxa, auxb, surround;
-    if (mc & 0x10) {
-        auxb = (mc & 6) == 0;
-        auxa = (mc & 7) == 1;
-        surround = false;
-    } else {
-        auxa = mc & 1;
-        auxb = mc & 2;
-        surround = mc & 4;
-    }
-    mix_add(g_left + offset, samples, SPMS, pb, PB_MIXER + 0, ramp);
-    mix_add(g_right + offset, samples, SPMS, pb, PB_MIXER + 2, ramp);
-    if (auxa) {
-        mix_add(g_auxa_l + offset, samples, SPMS, pb, PB_MIXER + 4, ramp);
-        mix_add(g_auxa_r + offset, samples, SPMS, pb, PB_MIXER + 6, ramp);
-        if (mc & 0x10) mix_add(g_auxa_s + offset, samples, SPMS, pb, PB_MIXER + 16, ramp);
-    }
-    if (auxb) {
-        mix_add(g_auxb_l + offset, samples, SPMS, pb, PB_MIXER + 8, ramp);
-        mix_add(g_auxb_r + offset, samples, SPMS, pb, PB_MIXER + 10, ramp);
-    }
-    if (surround) {
-        mix_add(g_surround + offset, samples, SPMS, pb, PB_MIXER + 14, ramp);
-        if (auxa) mix_add(g_auxa_s + offset, samples, SPMS, pb, PB_MIXER + 16, ramp);
-        if (auxb) mix_add(g_auxb_s + offset, samples, SPMS, pb, PB_MIXER + 12, ramp);
-    }
+    const Routing r = decode_mixer_control(pb.w[PB_MIXER_CONTROL]);
+    for (int out = 0; out < OUT_COUNT; out++)
+        if (r.on & (1u << out)) mix_add(g_out[out] + offset, samples, SPMS, pb, PB_MIXER + 2 * out, r.ramp & (1u << out));
 }
 
 void process_pb_list(uint32_t pb_addr) {
@@ -275,7 +308,12 @@ void output(uint32_t surround_addr, uint32_t lr_addr) {
 
 }  // namespace
 
-void ax_init() {}
+void ax_init(uint32_t ucode_hash) {
+    g_compact_mixer = false;
+    for (uint32_t h : kCompactMixerHashes)
+        if (h == ucode_hash) g_compact_mixer = true;
+    LOG(LOG_DSP, "AX: ucode %08X, mixer control %s", ucode_hash, g_compact_mixer ? "compact (2001)" : "a bit per output");
+}
 
 void ax_process_cmdlist(uint32_t addr, uint16_t size) {
     uint32_t pb_addr = 0;
