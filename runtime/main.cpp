@@ -502,7 +502,13 @@ int main(int argc, char** argv) {
                 SDL_GL_GetDrawableSize(win, &rw, &rh);
                 record::frame(0, rw, rh);
             }
-            SDL_GL_SwapWindow(win);
+            // Unpaced (--fast, or --fast-forward until its replay ends), only every 8th frame
+            // is presented. Presenting is held to the display's refresh rate even with the
+            // swap interval at 0 (a driver's vsync, or the compositor's), which held a fast
+            // replay to about that rate. Every frame is still rendered, since the guest may
+            // wait on what rendering writes back (copies to RAM, EFB peeks).
+            static uint32_t unpaced_frames = 0;
+            if (clock_scale() > 0 || ++unpaced_frames % 8 == 0) SDL_GL_SwapWindow(win);
             frames++;
             auto now = std::chrono::steady_clock::now();
             double secs = std::chrono::duration<double>(now - t0).count();
