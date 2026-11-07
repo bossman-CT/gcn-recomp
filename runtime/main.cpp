@@ -261,6 +261,7 @@ int main(int argc, char** argv) {
     if (iso_default.empty()) iso_default = plat_find_file("rom", ".ciso");
     const char* iso = iso_default.c_str();
     bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false, fullscreen = false;
+    bool fast_forward = false;
     std::string input_log_dir, replay_dir;
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
@@ -294,6 +295,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;
+        else if (!strcmp(argv[i], "--fast-forward")) fast_forward = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
@@ -332,6 +334,15 @@ int main(int argc, char** argv) {
     if (!replay_dir.empty()) {
         if (!input_replay_load(replay_dir, replay_card)) return 1;
         if (!replay_card.empty()) g_memcard_path = replay_card.c_str();
+    }
+    // --fast-forward: the replay as fast as the host allows, then real time from where it
+    // ends, with the live controller, so a recorded route can be played on from its end.
+    if (fast_forward) {
+        if (replay_dir.empty()) {
+            fprintf(stderr, "--fast-forward needs --replay=<dir>\n");
+            return 1;
+        }
+        clock_fast_until_replay_end();
     }
     if (input_log) {
         if (input_log_dir.empty()) {

@@ -524,6 +524,16 @@ static void clock_jump(uint64_t edges) {
     g_jump_edges += edges;
 }
 
+// --fast-forward: run a replay unpaced, then play on in real time from where it ends. The
+// switch is made here, on the thread that paces, and re-anchors the pacer at the present:
+// the fast-forward ran minutes of virtual time ahead of the host's, and the pacer would
+// otherwise sleep until the host caught up.
+static std::atomic<bool> g_fast_until_replay_end{false};
+void clock_fast_until_replay_end() {
+    g_time_scale = 0;
+    g_fast_until_replay_end = true;
+}
+
 // Hold virtual time to real time. Called from irq_poll, i.e. whenever an event is due,
 // which is at least every SI poll (1/120 s). When the host falls behind, the shortfall is
 // caught up (above) or, under GCN_CATCHUP=0 or in a replay with no jump recorded here,
@@ -532,6 +542,12 @@ void clock_pace() {
     clock_log();
     if (!g_virtual_clock) return;
     if (const uint64_t edges = input_replay_take_jump(g_vcount)) clock_jump(edges);
+    if (g_fast_until_replay_end && !input_replay_active()) {
+        g_fast_until_replay_end = false;
+        g_time_scale = 1.0;
+        g_pace_offset_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ)) - (int64_t)host_ns();
+        fprintf(stderr, "[input] the replay has ended: playing on at normal speed\n");
+    }
     if (g_time_scale <= 0) return;
     int64_t virt_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ) / g_time_scale);
     int64_t ahead = virt_ns - (int64_t)host_ns() - g_pace_offset_ns;

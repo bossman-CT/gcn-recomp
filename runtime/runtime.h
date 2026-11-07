@@ -72,6 +72,7 @@ void timing_init();
 bool clock_is_virtual();
 void clock_set_scale(double virtual_seconds_per_real_second);  // 0 = unpaced, run flat out
 double clock_scale();
+void clock_fast_until_replay_end();  // unpaced while a replay lasts, then real time (--fast-forward)
 // How fast the emulated CPU is, as a multiple of the console's (GCN_CPU_SCALE): on the
 // virtual clock a frame's work is charged 1/N of the time. 1 by default; 2 at most.
 void clock_set_cpu_scale(double n);

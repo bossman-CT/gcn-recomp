@@ -25,6 +25,10 @@ recording's start time, which the log carries. A replay therefore reproduces the
 bit for bit, including a crash at its end, unless the runtime itself has a nondeterministic
 path -- which is then the bug to find. `--fast` runs a replay as fast as the host allows;
 the game still sees 60 Hz.
+`--fast-forward` does the same until the replay has run out, then switches to real time
+with the live controller, so a recorded route can be played on from where it ends; the
+pacer is re-anchored at that moment (`clock_pace`), or it would sleep until the host caught
+up with the virtual time the fast-forward ran ahead.
 
 Logs recorded before the virtual clock (version 1, keyed by presented frame) still load and
 replay approximately, as they always did.
