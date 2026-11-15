@@ -52,6 +52,28 @@ void render_set_internal_scale(int scale);
 
 void render_set_window_size(int w, int h);
 
+// ---- Widescreen ----
+// Show frames with a 3D scene at `aspect` (width over height, 16/9 say) instead of 4:3; 4/3
+// or less is off, the default. The EFB keeps its size: a frame's scene is widened by
+// narrowing its x after the viewport, so it shows what lay past its frustum's sides, the
+// 2D draws over it are narrowed the same way and so keep their proportions, and the frame
+// is stretched to `aspect` when presented. A frame with no 3D scene across it is shown
+// 4:3 as before. What the game itself culls to its 4:3 view is still missing at the new
+// edges: that is the game's to widen. --aspect=W:H on the command line, or GCN_ASPECT.
+// See graphics.md, "Widescreen".
+void render_set_aspect(float aspect);
+float render_aspect();          // the aspect frames with a scene are shown at (4/3 when off)
+bool render_presented_wide();   // whether the last presented frame was shown wide
+// A 2D draw whose box lies wholly left of -split across the frame (-1 its left edge, 1 its
+// right) is kept at its distance from the left edge, one wholly right of +split from the
+// right; the rest stay centred. 1, the default, centres everything. GCN_WIDE_ANCHOR
+// overrides it.
+void render_set_wide_anchor(float split);
+// A 2D draw spanning at least -full..full across the frame is taken for a backdrop or a
+// fade and stretched over the wider picture instead (default 0.95). GCN_WIDE_FULL
+// overrides it.
+void render_set_wide_full(float full);
+
 // Redirect the finished frame somewhere other than the window framebuffer, e.g. a VR
 // swapchain image. 0 restores the default.
 void render_set_output_fbo(unsigned fbo);

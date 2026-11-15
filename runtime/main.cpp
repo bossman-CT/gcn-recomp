@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -271,6 +272,8 @@ int main(int argc, char** argv) {
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
     int scale = 2;
+    // --aspect=16:9 (or 1.78): widescreen, gx::render_set_aspect. GCN_ASPECT likewise.
+    const char* aspect = getenv("GCN_ASPECT");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log-all")) for (auto& e : g_log_enabled) e = true;
         else if (!strncmp(argv[i], "--log=", 6)) {
@@ -298,11 +301,22 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fast-forward")) fast_forward = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
         else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--aspect=", 9)) aspect = argv[i] + 9;
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
         else if (!strncmp(argv[i], "--dump-every=", 13)) gx::g_dump_every = atoi(argv[i] + 13);
         else if (argv[i][0] != '-') iso = argv[i];
     }
     if (test_ffb) return input_map_test_ffb(controls);
+    if (aspect && *aspect) {
+        float w = 0.0f, h = 0.0f;
+        const int n = sscanf(aspect, "%f:%f", &w, &h);
+        const float a = n == 2 && h > 0.0f ? w / h : w;
+        if (!(a > 0.0f)) {
+            fprintf(stderr, "--aspect: expected W:H or a ratio, such as 16:9 or 1.78, not %s\n", aspect);
+            return 1;
+        }
+        gx::render_set_aspect(a);
+    }
     plat_install_crash_handlers(on_interrupt, on_fault);
     if (record_to && !record::start(record_to, record_w, record_h, 60)) return 1;
     if (telemetry_to && !telemetry::configure(telemetry_to)) {
@@ -381,7 +395,7 @@ int main(int argc, char** argv) {
                                                   (gl_debug ? SDL_GL_CONTEXT_DEBUG_FLAG : 0));
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_Window* win = SDL_CreateWindow(GCN_APP_LABEL, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       1280, 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+                                       (int)lroundf(960 * gx::render_aspect()), 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
                                        (hidden ? SDL_WINDOW_HIDDEN : 0) |
                                        (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) fatal("SDL_CreateWindow: %s", SDL_GetError());

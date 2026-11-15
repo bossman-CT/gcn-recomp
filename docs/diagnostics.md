@@ -97,7 +97,10 @@ a log.
 
 `--hidden --dump-dir=DIR --dump-every=N` runs with the window hidden and writes every Nth
 presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of frames.
-`--headless` runs the guest with no renderer at all.
+`--headless` runs the guest with no renderer at all. A frame shown widescreen (`--aspect`) is
+dumped stretched to its aspect. `GCN_WIDE_LOG=N` reports, every Nth frame, how far past the
+4:3 frame's sides the game still draws (graphics.md, "Widescreen"); `GCN_WIDE_ANCHOR` and
+`GCN_WIDE_FULL` override a game's widescreen HUD settings, for trying others.
 
 ## Recording a movie
 

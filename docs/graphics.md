@@ -1046,3 +1046,45 @@ use it; a stage whose coordinate an eye has moved into an EFB copy's screen spac
 scales by the copy.
 `GCN_TEXCOORD_SCALE=texture` brings back the old scaling, by each stage's bound texture, for
 comparing a scene both ways.
+
+## Widescreen
+
+`--aspect=16:9` (or `GCN_ASPECT`, or `render_set_aspect`) shows frames wider than 4:3 without
+changing the EFB. The approach follows xSNAIRZx's widescreen in their fork of this runtime (MIT).
+Each draw is mapped `x' = s*x + b` in the EFB's normalized x, after its viewport, where `s` is
+4:3 over the new aspect (0.75 for 16:9). The frame is then stretched by `1/s` when it is
+presented. So:
+
+- the 3D scene (a perspective draw whose viewport spans at least 90% of the frame's width)
+  is narrowed in the EFB, which stretched back out is the same picture with more of the world
+  at the sides;
+- the 2D draws over it are narrowed the same way and keep their proportions. A marker the
+  game placed over a point of the scene with its own 4:3 projection still lands on it, since
+  the scene moved by the same map;
+- a 2D draw that spans the frame (`render_set_wide_full`, 0.95 by default: a backdrop, a fade,
+  a copy of the frame put back) is left as drawn, so it fills the wider picture;
+- a 2D draw, or a 3D one through a smaller viewport, can be kept at its distance from the
+  frame's nearer side instead of the centre (`render_set_wide_anchor`): a box lying wholly
+  beyond `split` on one side moves out with that side. 1, the default, keeps everything
+  centred. The rule is by position only, so a game turns it on with a split that suits its HUD;
+  a marker following something into that part of the frame moves out with the HUD;
+- a scissor rect moves with its draw, unless it spans the EFB's width;
+- the off-screen passes (`mark_offscreen_passes`) are left alone, since what they draw is a
+  texture;
+- a batch with no 3D scene across it (a menu, a movie, a still) is shown 4:3 as it was made, so
+  a game switches between 16:9 and 4:3 frames as it goes between the two.
+
+`wide_plan` makes these decisions for each batch before it is drawn, from the draws' viewports,
+scissors and the boxes their vertices cover. The VR paths never use any of it. A dumped frame
+(`--dump-dir`) is stretched to the aspect it was shown at.
+
+What it cannot do is draw what the game culled. A game that culls to its own 4:3 view leaves
+things missing at the new sides, and that has to be widened in the game. `GCN_WIDE_LOG=N`
+reports, every Nth frame, the scene draws lying wholly beyond the 4:3 frame's sides and how far
+out the farthest of them starts. If nothing lies past the old sides, the game culls to them.
+If things lie past the wide frame's sides too, it culls with room to spare.
+
+Other limits: the scene is drawn into the same 640 pixels across, so at `--scale=1` its pixels
+are stretched by `1/s`. A higher `--scale` covers that. A grab (a copy of part of the frame, put back
+where the game's 4:3 projection says) and a screen-space reflection lookup at the new sides
+read what the game expected to be at those places, not what the wider scene put there.

@@ -68,6 +68,7 @@ struct UniformShadow {
     uint8_t view_space, background, foreground, fg_layer, hud_layer, flat3d, screen, frame_screen, restore, facing;
     float hud_push;
     float viewport[6];
+    float wide[2];             // g_cur_wide_s, g_cur_wide_b
     uint32_t scissor_off;      // bp[0x59]
     uint32_t psize_reg;        // bp[0x22]
     uint32_t point_tex;        // point_tex_key(): what u_points and u_point_off were sent for
@@ -96,6 +97,20 @@ struct Program {
 
 // Samples kept per hardware pixel, in each axis. See render_set_internal_scale.
 static int g_scale = 2;
+
+// Widescreen (render_set_aspect). A frame is still drawn into the 640-wide EFB, and shown
+// 1/g_wide_s times as wide as 4:3: a draw is mapped x' = s*x + b in the EFB's normalized x
+// after its viewport, which, stretched back out, keeps its proportions -- and a 3D scene
+// shows what lay beyond its frustum's sides. b places it: centred, or kept at its distance
+// from one side of the frame (render_set_wide_anchor). wide_plan() decides each draw's.
+// g_wide_s 1 is off, and everything is drawn exactly as before.
+static float g_wide_s = 1.0f;
+static float g_wide_split = 1.0f;     // render_set_wide_anchor; 1 anchors nothing
+static float g_wide_full = 0.95f;     // render_set_wide_full
+static bool g_frame_wide = false;     // the batch being drawn is shown wide
+static bool g_present_wide = false;   // the frame last presented was
+static std::vector<float> g_wide_plan;  // per command: a draw's b, or NAN for as the game drew it
+static float g_cur_wide_s = 1.0f, g_cur_wide_b = 0.0f;   // the draw being applied
 
 // VR eye state. When active, perspective batches are re-projected for the eye and the
 // orthographic ones (the 2D HUD) are painted on a frame standing out in front of the
@@ -1608,6 +1623,7 @@ struct AppliedState {
     uint32_t pal_id[8];       // unit 8+m: the palette map m's EFB copy is read through
     int prim;
     bool hud_depth;
+    float wide[2];            // the widescreen map the scissor was set for
 };
 static AppliedState g_applied;
 // What GL's face culling is set to: -1 unknown, 0 off, 1 front, 2 back, 3 both. Kept apart
@@ -1670,7 +1686,8 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
     const bool perspective = (int)p[6] == 0;
     int xoff, yoff;
     scissor_offset(st.bp, xoff, yoff);
-    const float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
+    const float vpa[4] = {g_cur_wide_s * (2.0f * (vp[3] - xoff) / EFB_W - 1.0f) + g_cur_wide_b, g_cur_wide_s * 2.0f * vp[0] / EFB_W,
+                          2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
     const float vpb[2] = {2.0f * vp_far(vp) / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f};
     double X[3], Y[3], Z[3];
     for (int i = 0; i < 3; i++) {
@@ -2087,14 +2104,19 @@ static void apply_state(const PixelState& st, int prim) {
     // Per state, whatever the projection: see g_frame_grad.
     if (frame_screen && g_cur_uvgrad && pr.u_uvgrad >= 0) glUniform4fv(pr.u_uvgrad, 8, g_cur_uvgrad);
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
-    if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
+    if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0 &&
+          u.wide[0] == g_cur_wide_s && u.wide[1] == g_cur_wide_b)) {
         g_astat.viewport++;
-        float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
+        // The widescreen map (g_wide_s) applies after the viewport, in the EFB's own x.
+        float vpa[4] = {g_cur_wide_s * (2.0f * (vp[3] - xoff) / EFB_W - 1.0f) + g_cur_wide_b, g_cur_wide_s * 2.0f * vp[0] / EFB_W,
+                        2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
         float vpb[4] = {2.0f * vp_far(vp) / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f, 0, 0};
         glUniform4fv(pr.u_vp_a, 1, vpa);
         glUniform4fv(pr.u_vp_b, 1, vpb);
         memcpy(u.viewport, vp, sizeof(st.viewport));
         u.scissor_off = bp[0x59];
+        u.wide[0] = g_cur_wide_s;
+        u.wide[1] = g_cur_wide_b;
     }
     // Only points read the point size, and a game that sets a line width per draw changes
     // this register with every line: so it is sent when a draw of points needs it, and a
@@ -2469,11 +2491,21 @@ static void apply_state(const PixelState& st, int prim) {
     }
     g_applied.prim = prim;
     // Scissor (EFB coords, y down), measured from the same origin as the viewport.
-    const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59];
+    const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59] &&
+                              g_applied.wide[0] == g_cur_wide_s && g_applied.wide[1] == g_cur_wide_b;
     if (!same_scissor) {
         g_astat.scissor++;
         int x0 = (int)(bp[0x20] >> 12 & 0x7FF) - xoff, y0 = (int)(bp[0x20] & 0x7FF) - yoff;
         int x1 = (int)(bp[0x21] >> 12 & 0x7FF) - xoff + 1, y1 = (int)(bp[0x21] & 0x7FF) - yoff + 1;
+        // A widescreen-mapped draw's scissor moves with it, unless it spans the EFB's width:
+        // that one clips nothing at the sides, and the scene beyond the old ones needs it open.
+        if (g_cur_wide_s != 1.0f && (x0 > 0 || x1 < EFB_W)) {
+            const float k = 0.5f * EFB_W * (1.0f - g_cur_wide_s + g_cur_wide_b);
+            x0 = (int)floorf(g_cur_wide_s * x0 + k);
+            x1 = (int)ceilf(g_cur_wide_s * x1 + k);
+        }
+        g_applied.wide[0] = g_cur_wide_s;
+        g_applied.wide[1] = g_cur_wide_b;
         if (x0 < 0) x0 = 0;
         if (y0 < 0) y0 = 0;
         if (x1 > EFB_W) x1 = EFB_W;
@@ -2699,6 +2731,28 @@ int g_dump_every = 0;
 static bool g_pair_second = false;
 static const char* g_dump_suffix = "";
 
+// A dumped frame as it is shown: one drawn wide (g_present_wide) is stretched to its aspect,
+// filtered linearly across.
+static void write_frame_png(const char* path, const std::vector<uint8_t>& px, int w, int h) {
+    if (!g_present_wide) {
+        write_png(path, px.data(), w, h);
+        return;
+    }
+    const int ow = (int)lroundf(w / g_wide_s);
+    std::vector<uint8_t> out((size_t)ow * h * 4);
+    for (int x = 0; x < ow; x++) {
+        const float sx = std::min(std::max((x + 0.5f) * w / ow - 0.5f, 0.0f), (float)(w - 1));
+        const int x0 = (int)sx, x1 = std::min(x0 + 1, w - 1);
+        const float f = sx - x0;
+        for (int y = 0; y < h; y++)
+            for (int k = 0; k < 4; k++) {
+                const float a = px[((size_t)y * w + x0) * 4 + k], b = px[((size_t)y * w + x1) * 4 + k];
+                out[((size_t)y * ow + x) * 4 + k] = (uint8_t)lroundf(a + (b - a) * f);
+            }
+    }
+    write_png(path, out.data(), ow, h);
+}
+
 static void dump_efb(const EfbCopyCmd& c) {
     int w = c.src_w * g_scale, h = c.src_h * g_scale;
     std::vector<uint8_t> px((size_t)w * h * 4), flipped((size_t)w * h * 4);
@@ -2710,7 +2764,7 @@ static void dump_efb(const EfbCopyCmd& c) {
     }
     char path[512];
     snprintf(path, sizeof(path), "%s/frame_%05u%s.png", g_dump_dir, g_present_count, g_dump_suffix);
-    write_png(path, flipped.data(), w, h);
+    write_frame_png(path, flipped, w, h);
 }
 
 // Where the finished frame is blitted. 0 is the window's framebuffer; a VR frontend
@@ -2737,11 +2791,18 @@ static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, 
     glViewport(0, 0, g_win_w, g_win_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    // Letterbox to 4:3
+    // Letterbox to 4:3, or to the widescreen aspect for a frame drawn wide.
     int w = g_win_w, h = g_win_h;
-    int vw = w, vh = w * 3 / 4;
-    if (vh > h) { vh = h; vw = h * 4 / 3; }
-    glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
+    if (g_present_wide) {
+        const float aspect = (4.0f / 3.0f) / g_wide_s;
+        int vw = w, vh = (int)lroundf(w / aspect);
+        if (vh > h) { vh = h; vw = (int)lroundf(h * aspect); }
+        glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
+    } else {
+        int vw = w, vh = w * 3 / 4;
+        if (vh > h) { vh = h; vw = h * 4 / 3; }
+        glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
+    }
     glUseProgram(g_blit_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, src_tex);
@@ -2813,7 +2874,7 @@ static void dump_xfb(const Xfb& x, uint32_t w) {
     }
     char path[512];
     snprintf(path, sizeof(path), "%s/frame_%05u%s.png", g_dump_dir, g_present_count, g_dump_suffix);
-    write_png(path, flipped.data(), pw, ph);
+    write_frame_png(path, flipped, pw, ph);
 }
 
 // A display copy into its XFB. Returns the XFB when the copy completed a frame of it.
@@ -2838,6 +2899,7 @@ static Xfb* xfb_write(const EfbCopyCmd& c) {
 }
 
 static void present(const EfbCopyCmd& c) {
+    g_present_wide = g_frame_wide;
     // A copy that is part of a frame: into the XFB, and nothing to show unless it was the
     // last part.
     Xfb* xfb = nullptr;
@@ -3557,6 +3619,145 @@ static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip) {
     }
 }
 
+// Widescreen: whether a batch is shown wide (g_frame_wide), and what each of its draws is
+// mapped by (g_wide_plan). A batch is shown wide when it draws a 3D scene across the frame:
+// a perspective draw, outside the off-screen passes, through a viewport spanning most of the
+// frame's width. One of 2D only -- a menu, a still -- is shown 4:3 as it was made. In one
+// shown wide:
+//  - the scene, and anything else drawn through a viewport that wide, is widened;
+//  - an orthographic draw across the frame (render_set_wide_full) is a backdrop, a fade or a
+//    copy of the frame put back, and is left to fill the wider picture;
+//  - any other 2D draw, or a 3D one through a smaller viewport (a model in a window of the
+//    HUD), keeps its proportions: centred, or kept at its distance from the side its box
+//    lies on (render_set_wide_anchor);
+//  - the off-screen passes are left alone: what they draw is a texture, not the frame.
+static void wide_plan(const Batch& b) {
+    g_wide_plan.clear();
+    g_frame_wide = false;
+    if (g_wide_s >= 1.0f || g_vr_active) return;
+    static const bool env_read = [] {
+        if (const char* e = getenv("GCN_WIDE_ANCHOR")) g_wide_split = (float)atof(e);
+        if (const char* e = getenv("GCN_WIDE_FULL")) g_wide_full = (float)atof(e);
+        return true;
+    }();
+    (void)env_read;
+    std::vector<uint8_t> skip;
+    mark_offscreen_passes(b, skip);
+    // The frame: the display copy's rect of the EFB.
+    float fx0 = 0.0f, fx1 = (float)EFB_W;
+    for (auto& c : b.cmds)
+        if ((c.type == CmdType::EfbCopy && c.copy.to_xfb) || c.type == CmdType::Present) {
+            fx0 = (float)c.copy.src_x;
+            fx1 = (float)(c.copy.src_x + c.copy.src_w);
+            break;
+        }
+    const float cx = 0.5f * (fx0 + fx1), hw = 0.5f * (fx1 - fx0);
+    if (hw <= 0.0f) return;
+    // A draw's viewport and scissor, in EFB pixels across.
+    auto rects = [](const PixelState& st, float& vx0, float& vx1, float& sx0, float& sx1) {
+        int xoff, yoff;
+        scissor_offset(st.bp, xoff, yoff);
+        const float half = fabsf(st.viewport[0]);
+        vx0 = st.viewport[3] - xoff - half;
+        vx1 = st.viewport[3] - xoff + half;
+        sx0 = (float)((int)(st.bp[0x20] >> 12 & 0x7FF) - xoff);
+        sx1 = (float)((int)(st.bp[0x21] >> 12 & 0x7FF) - xoff + 1);
+    };
+    const float scene_w = 0.9f * (fx1 - fx0);
+    for (size_t i = 0; i < b.cmds.size() && !g_frame_wide; i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || skip[i] || (int)b.states[c.state].proj[6] != 0) continue;
+        float vx0, vx1, sx0, sx1;
+        rects(b.states[c.state], vx0, vx1, sx0, sx1);
+        if (vx1 - vx0 >= scene_w) g_frame_wide = true;
+    }
+    if (!g_frame_wide) return;
+    // GCN_WIDE_LOG=N: every Nth frame, how far past the sides of the 4:3 frame the game still
+    // draws. A scene draw lying wholly beyond one side was not culled to the 4:3 view; the
+    // farthest of their inner edges (1 is the 4:3 frame's side, 1/s the wide frame's) says
+    // whether the game culls to its view at all, and with how much to spare. A game that
+    // culls tightly shows things popping in and out at the new edges.
+    static const int wide_log = getenv("GCN_WIDE_LOG") ? atoi(getenv("GCN_WIDE_LOG")) : 0;
+    if (wide_log > 0 && g_render_frame % wide_log == 0) {
+        int n = 0, out = 0;
+        float farthest = 0.0f;
+        for (size_t i = 0; i < b.cmds.size(); i++) {
+            const Cmd& c = b.cmds[i];
+            if (c.type != CmdType::Draw || skip[i] || (int)b.states[c.state].proj[6] != 0) continue;
+            const PixelState& st = b.states[c.state];
+            float vx0, vx1, sx0, sx1;
+            rects(st, vx0, vx1, sx0, sx1);
+            if (vx1 - vx0 < scene_w) continue;
+            n++;
+            float lo = 1e30f, hi = -1e30f;
+            bool behind = false;
+            for (uint32_t v = 0; v < c.count && !behind; v++) {
+                const float* q = b.verts[b.indices[c.first + v]].pos;
+                const float w = -q[2];
+                if (w <= 0.0f) { behind = true; break; }
+                const float x = (st.proj[0] * q[0] + st.proj[1] * q[2]) / w;
+                lo = std::min(lo, x);
+                hi = std::max(hi, x);
+            }
+            if (behind || (lo <= 1.0f && hi >= -1.0f)) continue;
+            out++;
+            farthest = std::max(farthest, lo > 1.0f ? lo : -hi);
+        }
+        fprintf(stderr, "[wide] f%u scene draws %d, wholly outside the 4:3 frame %d, farthest inner edge %.2f (wide frame's side %.2f)\n",
+                g_render_frame, n, out, farthest, 1.0f / g_wide_s);
+    }
+    const float s = g_wide_s;
+    // The b of x' = s*x + b (EFB-normalized) that maps the frame's centre, moved t of its
+    // half-width, to the centre.
+    auto b_for = [&](float t) { return s - 1.0f + 2.0f * ((1.0f - s) * cx + t * hw) / EFB_W; };
+    g_wide_plan.assign(b.cmds.size(), NAN);
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type != CmdType::Draw || skip[i]) continue;
+        const PixelState& st = b.states[c.state];
+        const bool perspective = (int)st.proj[6] == 0;
+        float vx0, vx1, sx0, sx1;
+        rects(st, vx0, vx1, sx0, sx1);
+        if (perspective && vx1 - vx0 >= scene_w) {
+            g_wide_plan[i] = b_for(0.0f);
+            continue;
+        }
+        // The box it covers across the frame.
+        float x0 = std::max(vx0, sx0), x1 = std::min(vx1, sx1);
+        if (!perspective) {
+            int xoff, yoff;
+            scissor_offset(st.bp, xoff, yoff);
+            float lo = 1e30f, hi = -1e30f;
+            for (uint32_t v = 0; v < c.count; v++) {
+                const float* q = b.verts[b.indices[c.first + v]].pos;
+                const float px = st.viewport[3] - xoff + st.viewport[0] * (st.proj[0] * q[0] + st.proj[1]);
+                lo = std::min(lo, px);
+                hi = std::max(hi, px);
+            }
+            x0 = std::max(x0, lo);
+            x1 = std::min(x1, hi);
+        }
+        if (x1 <= x0) {
+            g_wide_plan[i] = b_for(0.0f);
+            continue;
+        }
+        const float f0 = (x0 - cx) / hw, f1 = (x1 - cx) / hw;
+        if (!perspective && f0 <= -g_wide_full && f1 >= g_wide_full) continue;
+        float t = 0.0f;
+        if (f1 <= -g_wide_split) t = -(1.0f - s);
+        else if (f0 >= g_wide_split) t = 1.0f - s;
+        g_wide_plan[i] = b_for(t);
+    }
+}
+
+void render_set_aspect(float aspect) {
+    g_wide_s = aspect > 4.0f / 3.0f + 1e-3f ? (4.0f / 3.0f) / aspect : 1.0f;
+}
+float render_aspect() { return (4.0f / 3.0f) / g_wide_s; }
+bool render_presented_wide() { return g_present_wide; }
+void render_set_wide_anchor(float split) { g_wide_split = split; }
+void render_set_wide_full(float full) { g_wide_full = full; }
+
 // Texture ids holding a copy of a whole frame.
 //
 // A draw sampling one is screen-space, so in an eye it is a flat billboard rather than
@@ -4209,6 +4410,8 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     }
     bool presented = false;
     uint32_t cur_state = UINT32_MAX;
+    g_cur_wide_s = 1.0f;
+    g_cur_wide_b = 0.0f;
     gl_state_invalidate();
     view_invalidate();   // the flat view, after an eye
     memset(g_zplane, 0, sizeof(g_zplane));  // none yet this frame
@@ -4447,6 +4650,16 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                 }
             }
             if (comp && no_comp) break;
+            // The draw's widescreen map (wide_plan); a change of it is a change of state.
+            {
+                const float wb = g_wide_plan.empty() ? NAN : g_wide_plan[ci];
+                const float ws = std::isnan(wb) ? 1.0f : g_wide_s, wbb = std::isnan(wb) ? 0.0f : wb;
+                if (ws != g_cur_wide_s || wbb != g_cur_wide_b) {
+                    g_cur_wide_s = ws;
+                    g_cur_wide_b = wbb;
+                    cur_state = UINT32_MAX;
+                }
+            }
             // A triangle drawn without z freeze is the plane the next z freeze draws take,
             // culled or not: a game draws one it culls to set the plane.
             const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
@@ -4551,7 +4764,11 @@ static void panel_hide(const Batch& b) {
 bool render_execute(Batch& b) {
     frame_observe(b, nullptr);
     panel_hide(b);
-    return execute_batch(b, true);
+    wide_plan(b);
+    const bool presented = execute_batch(b, true);
+    g_wide_plan.clear();
+    g_frame_wide = false;
+    return presented;
 }
 
 void render_set_panel_band(float band) { g_panel_band = band; }

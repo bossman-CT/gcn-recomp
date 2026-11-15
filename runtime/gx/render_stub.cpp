@@ -14,5 +14,8 @@ void render_set_frame_hook(FrameHook) {}
 void render_set_world_pitch_hook(WorldPitchHook) {}
 void render_set_shader_keys(const void*, size_t) {}
 void render_set_push_out(float) {}
+float render_aspect() { return 4.0f / 3.0f; }
+void render_set_wide_anchor(float) {}
+void render_set_wide_full(float) {}
 uint32_t present_count() { return 0; }
 }  // namespace gx
