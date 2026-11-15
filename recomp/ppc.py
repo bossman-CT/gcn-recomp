@@ -553,7 +553,7 @@ def translate59(pc, i, d, a, b, cc, rc):
         31: f'-fma({F(a)}, {F(cc)}, {F(b)})',
     }
     if xo in ops:
-        return f'{{ double v = (double)(float)({ops[xo]}); {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
+        return f'{{ double v = RND_S(c, {ops[xo]}); {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
     raise Unimpl(f'op59 xo {xo}')
 
 
@@ -572,15 +572,15 @@ def translate63(pc, i, d, a, b, cc, rc):
         31: f'-fma({F(a)}, {F(cc)}, {F(b)})',
     }
     if xo5 in ops5:
-        return f'{{ double v = {ops5[xo5]}; {F(d)} = v;{FPRF_D} }}' + cr1(rc)
+        return f'{{ double v = RND_D(c, {ops5[xo5]}); {F(d)} = v;{FPRF_D} }}' + cr1(rc)
     if xo5 == 23:  # fsel
         return f'{F(d)} = ({F(a)} >= 0.0) ? {F(cc)} : {F(b)};' + cr1(rc)
     if xo5 == 22:  # fsqrt (not on gekko, but harmless)
-        return f'{{ double v = sqrt({F(b)}); {F(d)} = v;{FPRF_D} }}' + cr1(rc)
+        return f'{{ double v = RND_D(c, sqrt({F(b)})); {F(d)} = v;{FPRF_D} }}' + cr1(rc)
     if xo in (0, 32):  # fcmpu, fcmpo
         return f'c->cr[{d >> 2}] = FCMP({F(a)}, {F(b)});'
     if xo == 12:  # frsp
-        return f'{{ double v = (double)(float){F(b)}; {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
+        return f'{{ double v = RND_S(c, {F(b)}); {F(d)} = v; {P1(d)} = v;{FPRF_S} }}' + cr1(rc)
     if xo == 14:  # fctiw
         return f'c->f[{d}].u = 0xFFF8000000000000ull | (uint32_t)FCTIW(c, {F(b)});' + cr1(rc)
     if xo == 15:  # fctiwz
@@ -627,7 +627,7 @@ def translate4(pc, i, d, a, b, cc, rc):
     def pair(e0, e1, rnd=True):
         fprf = ''
         if rnd:
-            e0, e1 = f'(double)(float)({e0})', f'(double)(float)({e1})'
+            e0, e1 = f'RND_S(c, {e0})', f'RND_S(c, {e1})'
             fprf = ' c->fprf_v = v0; c->fprf_pending = 2;'
         return f'{{ double v0 = {e0}, v1 = {e1}; {F(d)} = v0; {P1(d)} = v1;{fprf} }}' + cr1(rc)
 
@@ -744,8 +744,8 @@ def translate_step(pc, i, x, p=1.0):
         A, B, C = F(a), F(b), F(cc)
         e = step_expr(xo5, A, B, C, x, S, pc, P)
         if op == 59:
-            return f'{{ double v = (double)(float)({e}); {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
-        return f'{F(d)} = {e};' + cr1(rc)
+            return f'{{ double v = RND_S(c, {e}); {F(d)} = v; {P1(d)} = v; }}' + cr1(rc)
+        return f'{F(d)} = RND_D(c, {e});' + cr1(rc)
     if op == 4:
         xo5 = (i >> 1) & 0x1F
         A0, A1, B0, B1, C0, C1 = F(a), P1(a), F(b), P1(b), F(cc), P1(cc)
@@ -758,7 +758,7 @@ def translate_step(pc, i, x, p=1.0):
         else:
             e0 = step_expr(xo5, A0, B0, C0, x, S, pc, P)
             e1 = step_expr(xo5, A1, B1, C1, x, S, pc, P)
-        return (f'{{ double v0 = (double)(float)({e0}), v1 = (double)(float)({e1}); '
+        return (f'{{ double v0 = RND_S(c, {e0}), v1 = RND_S(c, {e1}); '
                 f'{F(d)} = v0; {P1(d)} = v1; }}' + cr1(rc))
     raise Unimpl(f'step op {op} x={x}')
 

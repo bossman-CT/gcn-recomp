@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include <setjmp.h>
 
 #ifdef __cplusplus
@@ -268,6 +269,24 @@ static inline uint8_t fcmp(double a, double b) {
     return 1;
 }
 #define FCMP(a, b) fcmp((a), (b))
+
+/* FPSCR[NI], non-IEEE mode. The SDK's OSInit sets it (PPCSetFpNonIEEEMode), so an SDK game
+   runs with it on: the 750 then returns a signed zero for an arithmetic result too small to
+   be a normal number, where IEEE mode keeps the denormal. Code relies on it. A vector
+   routine that squares a tiny length and checks the sum for zero gets a denormal instead,
+   whose reciprocal square root estimate squares to infinity, and the vector it scales by
+   that becomes infinite. Loads, stores and moves are not arithmetic and keep denormals.
+   RND_S rounds an arithmetic result to single precision, RND_D checks a double one. */
+#define FPSCR_NI 0x4u
+static inline double RND_S(const CPU* c, double x) {
+    float f = (float)x;
+    if (UNLIKELY(fabsf(f) < FLT_MIN) && (c->fpscr & FPSCR_NI)) f = copysignf(0.0f, f);
+    return (double)f;
+}
+static inline double RND_D(const CPU* c, double x) {
+    if (UNLIKELY(fabs(x) < DBL_MIN) && (c->fpscr & FPSCR_NI)) x = copysign(0.0, x);
+    return x;
+}
 
 static inline int32_t FCTIWZ(double d) {
     if (d != d) return INT32_MIN;
