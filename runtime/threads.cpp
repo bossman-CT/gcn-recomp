@@ -15,6 +15,7 @@
 #include "mmu.h"
 #include "platform.h"
 #include "input_log.h"
+#include "settings.h"
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -346,6 +347,7 @@ static void ticker_main() {
 }
 
 void threads_start_boot(uint32_t entry) {
+    settings::start_guest();  // the values the guest starts with, latched (and logged) before it runs
     if (!clock_is_virtual()) {
         static std::thread ticker(ticker_main);
         ticker.detach();

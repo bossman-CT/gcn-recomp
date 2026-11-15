@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <thread>
 #include <mutex>
@@ -562,6 +563,35 @@ void clock_pace() {
         input_log_jump(g_vcount, edges);
         clock_jump(edges);
     }
+}
+
+// The pause gate (runtime.h). The flag is checked without the lock on every frame; the
+// lock and the wait only happen while a pause is asked for.
+static std::mutex g_pause_mutex;
+static std::condition_variable g_pause_cv;
+static std::atomic<bool> g_pause_wanted{false}, g_pause_held{false};
+
+void guest_pause(bool on) {
+    {
+        std::lock_guard<std::mutex> lk(g_pause_mutex);
+        g_pause_wanted = on;
+    }
+    g_pause_cv.notify_all();
+}
+
+bool guest_paused() { return g_pause_held; }
+
+void guest_pause_gate() {
+    if (!g_pause_wanted) return;
+    {
+        std::unique_lock<std::mutex> lk(g_pause_mutex);
+        g_pause_held = true;
+        g_pause_cv.wait(lk, [] { return !g_pause_wanted; });
+        g_pause_held = false;
+    }
+    // Virtual time stood still while the host's ran on: start pacing again from here.
+    if (g_virtual_clock && g_time_scale > 0)
+        g_pace_offset_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ) / g_time_scale) - (int64_t)host_ns();
 }
 
 struct Event {

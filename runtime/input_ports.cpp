@@ -2,6 +2,7 @@
 #include "input_ports.h"
 #include "input_map.h"
 #include "input_script.h"
+#include "runtime.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -372,7 +373,7 @@ void merge(int port, PadState& p) {
     input_map_apply(port, p, P.ctl, P.type);
     if (P.ctl) gyro(P, p);
     // The pad's rumble motor on the controller, renewed while it runs.
-    const bool motor = pad_motor(port);
+    const bool motor = pad_motor(port) && !guest_paused();  // a paused game leaves its motor on
     if (P.ctl && (motor || P.rumbling)) SDL_GameControllerRumble(P.ctl, motor ? 0x6000 : 0, motor ? 0xA000 : 0, motor ? 200 : 0);
     P.rumbling = motor;
 }

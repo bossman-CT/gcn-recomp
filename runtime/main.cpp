@@ -12,6 +12,8 @@
 #include "vr_game.h"
 #include "telemetry.h"
 #include "record.h"
+#include "overlay.h"
+#include "settings.h"
 #ifdef GCN_OPENXR
 #include "xr_desktop.h"
 #endif
@@ -168,6 +170,7 @@ static bool pump_events() {
     bool running = true;
     while (SDL_PollEvent(&e)) {
         input_map_event(e);
+        if (overlay::handle_event(e)) continue;  // F1, Esc, Back, and everything while the menu is open
         if (e.type == SDL_KEYDOWN && !e.key.repeat && g_win &&
             (e.key.keysym.scancode == SDL_SCANCODE_F11 ||
              (e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))))
@@ -176,7 +179,7 @@ static bool pump_events() {
         if (e.type == SDL_QUIT) running = false;
         else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
     }
-    return running;
+    return running && !overlay::quit_requested();
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +206,7 @@ int main(int argc, char** argv) {
     bool test_ffb = false;
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
-    int scale = 2;
+    int scale = 0;  // 0: the setting, graphics.internal_scale
     // --aspect=16:9 (or 1.78): widescreen, gx::render_set_aspect. GCN_ASPECT likewise.
     const char* aspect = getenv("GCN_ASPECT");
     for (int i = 1; i < argc; i++) {
@@ -214,6 +217,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--eye")) g_eye_mode = true;
         else if (!strcmp(argv[i], "--vr")) vr = true;
         else if (!strcmp(argv[i], "--list-controls")) return input_map_probe();
+        else if (!strcmp(argv[i], "--list-settings")) return settings::list(stdout);
+        else if (settings::parse_arg(argv[i])) {}  // --set=<key>=<value>, --settings=<path>
         else if (!strcmp(argv[i], "--test-ffb")) test_ffb = true;
         else if (!strncmp(argv[i], "--controls=", 11)) controls = argv[i] + 11;
         else if (!strcmp(argv[i], "--telemetry")) telemetry_to = "";
@@ -249,6 +254,8 @@ int main(int argc, char** argv) {
         }
         gx::render_set_aspect(a);
     }
+    // settings.txt, under the command line's own flags (overlay.h).
+    overlay::startup(argv, scale, fullscreen, aspect && *aspect);
     plat_install_crash_handlers(on_interrupt, on_fault);
     if (record_to && !record::start(record_to, record_w, record_h, 60)) return 1;
     if (telemetry_to && !telemetry::configure(telemetry_to)) {
@@ -382,6 +389,7 @@ int main(int argc, char** argv) {
     }
 #endif
     gx::render_init(scale);
+    overlay::init(win);
     if (g_eye_mode) eye_init();
     if (first_person) gx::render_set_first_person(true);
     if (gx::g_dump_dir) plat_make_dirs(gx::g_dump_dir);
@@ -402,7 +410,10 @@ int main(int argc, char** argv) {
         SDL_GL_GetDrawableSize(win, &dw, &dh);
         gx::render_set_window_size(dw, dh);
         auto b = gx::take_batch(4);
-        if (!b) continue;
+        if (!b) {
+            if (overlay::redraw(dw, dh)) SDL_GL_SwapWindow(win);  // the menu, over a paused game
+            continue;
+        }
         // GCN_STEREOLOG=1: what the game's stereo hook (vr_game.h) would have a headset
         // show, whenever the answer changes, numbered as the frame dumps are.
         static const bool stereolog = getenv("GCN_STEREOLOG") != nullptr;
@@ -451,6 +462,7 @@ int main(int argc, char** argv) {
                 SDL_GL_GetDrawableSize(win, &rw, &rh);
                 record::frame(0, rw, rh);
             }
+            overlay::draw(dw, dh);  // after the recording, which leaves the menu out
             // Unpaced (--fast, or --fast-forward until its replay ends), only every 8th frame
             // is presented. Presenting is held to the display's refresh rate even with the
             // swap interval at 0 (a driver's vsync, or the compositor's), which held a fast
@@ -470,6 +482,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    overlay::shutdown();
     record::finish();
     input_log_end();
     input_map_shutdown();

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "../runtime.h"
 #include "../platform.h"
+#include "../settings.h"
 #include "gx.h"
 #include "render.h"
 #include "render_gl.h"
@@ -397,7 +398,12 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
         debug_guest_check("frame");
         heap_trace_frame(gx::g_frames_submitted.load());
         ram_dump_frame(gx::g_frames_submitted.load());
+        // The settings the guest reads change here, before the game's own hook, so the
+        // hook and the frame that follows see one value; then the pause gate, after this
+        // frame's work is done.
+        settings::guest_frame(gx::g_frames_submitted.load());
         if (g_guest_frame_hook) g_guest_frame_hook(gx::g_frames_submitted.load());
+        guest_pause_gate();
         break;
     }
 }

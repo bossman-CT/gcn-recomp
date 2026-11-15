@@ -402,6 +402,7 @@ function(gcn_add_game)
   set(CORE_SOURCES ${RUNTIME_SOURCES})
   list(REMOVE_ITEM CORE_SOURCES
     ${RT}/main.cpp ${RT}/input_map.cpp ${RT}/input_ports.cpp ${RT}/ffb.cpp ${RT}/audio.cpp ${RT}/audio_sdl.cpp ${RT}/png.cpp ${RT}/record.cpp
+    ${RT}/overlay.cpp ${RT}/overlay_pages.cpp
     ${RT}/gx/render_gl.cpp ${RT}/gx/gl_load.cpp ${RT}/gx/shadergen.cpp)
   list(APPEND CORE_SOURCES ${RT}/audio_stub.cpp)
   # The benchmark compiles the game's SOURCES too (gcn_add_game), and a game's eye hook
@@ -463,6 +464,23 @@ function(gcn_add_game)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
     set(GCN_SDL_TARGET PkgConfig::SDL2)
+  endif()
+
+  # Dear ImGui (third_party/imgui, MIT, vendored at a tagged release) for the in-game menu
+  # (runtime/overlay.cpp): its core and its SDL2 and OpenGL 3 backends, for the desktop
+  # executable only. The backend brings its own GL loader, so it needs nothing of glad.
+  set(GCN_IMGUI_DIR ${GCN_RECOMP_DIR}/third_party/imgui)
+  if(NOT GCN_BENCH_ONLY AND NOT GCN_VISIONOS AND NOT ANDROID AND NOT TARGET gcn_imgui)
+    add_library(gcn_imgui STATIC
+      ${GCN_IMGUI_DIR}/imgui.cpp ${GCN_IMGUI_DIR}/imgui_draw.cpp ${GCN_IMGUI_DIR}/imgui_tables.cpp
+      ${GCN_IMGUI_DIR}/imgui_widgets.cpp
+      ${GCN_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp ${GCN_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(gcn_imgui PUBLIC ${GCN_IMGUI_DIR})
+    target_link_libraries(gcn_imgui PRIVATE ${GCN_SDL_TARGET})
+    target_compile_definitions(gcn_imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+    if(GCN_GL_ES)
+      target_compile_definitions(gcn_imgui PRIVATE IMGUI_IMPL_OPENGL_ES3)
+    endif()
   endif()
 
   if(MSVC)
@@ -550,7 +568,7 @@ function(gcn_add_game)
     endif()
     _gcn_set_standards(runtime_check)
     target_include_directories(runtime_check PRIVATE ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
-    target_link_libraries(runtime_check PRIVATE ${GCN_SDL_TARGET})
+    target_link_libraries(runtime_check PRIVATE ${GCN_SDL_TARGET} gcn_imgui)
     target_compile_options(runtime_check PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(runtime_check PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} ${GCN_GL_DEFS})
   endif()
@@ -561,7 +579,7 @@ function(gcn_add_game)
     add_executable(${G_NAME} ${_desktop_sources} ${G_SOURCES})
     _gcn_set_standards(${G_NAME})
     target_include_directories(${G_NAME} PRIVATE ${GLAD_INCLUDE_DIR})
-    target_link_libraries(${G_NAME} PRIVATE gcn_core game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS})
+    target_link_libraries(${G_NAME} PRIVATE gcn_core game_recomp ${GCN_SDL_TARGET} ${GCN_PLATFORM_LIBS} gcn_imgui)
     target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME} PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS} ${GCN_GL_DEFS})
 

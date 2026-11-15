@@ -69,3 +69,13 @@ void input_log_jump(uint64_t at, uint64_t edges);
 uint64_t input_replay_next_jump_at();
 // If a recorded jump is due at `count` (or was passed), takes it and returns its size.
 uint64_t input_replay_take_jump(uint64_t count);
+
+// Settings the guest reads (settings.h, AffectsGuest) are input too: a game that changes
+// what it does by one parts from its recording as soon as the value differs. Each value
+// the guest latches is logged against the submitted frame it took effect at
+// (`setting <frame> <key> <value>`), the values it started with at frame 0, and a replay
+// latches the logged values at the same frames instead of the live ones while it lasts.
+void input_log_setting(uint32_t frame, const char* key, const char* value);
+// In a replay: calls `fn` for every recorded setting due by `frame` and not yet applied, in
+// the order logged. A log without setting lines calls nothing.
+void input_replay_settings(uint32_t frame, void (*fn)(const char* key, const char* value));

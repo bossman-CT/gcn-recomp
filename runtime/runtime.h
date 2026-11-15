@@ -87,6 +87,13 @@ void step_override(double s);
 double clock_cpu_scale();
 void clock_update_limit();   // recompute g_vlimit from the next event / decrementer deadline
 void clock_pace();           // sleep if virtual time is ahead of real time (virtual clock only)
+// Pausing (the menu): while a pause is asked for, the guest waits at its next frame
+// boundary (gx/fifo.cpp), between frames, where its state is consistent. Guest time is
+// virtual, so a pause is invisible to the game and to a replay; when it ends the pacer is
+// re-anchored at the present rather than catching up on the time spent paused.
+void guest_pause(bool on);   // any thread
+bool guest_paused();         // whether the guest is waiting at the gate now
+void guest_pause_gate();     // the guest thread, at a frame boundary
 void irq_request();          // make the running guest thread poll at its next back-edge
 uint64_t host_ns();          // wall clock since start, for diagnostics
 void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi.cpp)

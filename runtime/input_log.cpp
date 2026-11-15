@@ -85,6 +85,11 @@ struct PoseChannel {
 };
 std::vector<PoseChannel> g_poses;
 
+// ---- settings (input_log_setting) ----
+struct SettingRecord { uint32_t frame; std::string key, value; };
+std::vector<SettingRecord> g_setting_replay;  // in the order logged
+size_t g_setting_pos;                          // first not yet applied
+
 // The first time the replay makes a jump or a pose read outside the polls the recording
 // made it between: where the replay parted from its recording. Said once; the replay goes on.
 void parted(const char* what, uint32_t lo, uint32_t hi) {
@@ -128,11 +133,12 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
     time_t now = time(nullptr);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     rtc_set_base(now);
-    fprintf(g_out, "# gcn-recomp input log v4\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
+    fprintf(g_out, "# gcn-recomp input log v5\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
     fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
     fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
     fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
     fprintf(g_out, "# pose <kind> <read> <valid> <values...>: what the game's Nth read of that pose saw, from there on\n");
+    fprintf(g_out, "# setting <frame> <key> <value>: a setting the game reads, from the end of that submitted frame on\n");
     fflush(g_out);
     if (plat_readable(memcard_path.c_str())) {
         if (!copy_file(memcard_path, dir + "/memcard_a.raw"))
@@ -188,6 +194,15 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         if (sscanf(line, "jump %llu %llu", &jat, &jedges) == 2) {
             g_jumps.push_back(Jump{(uint64_t)jat, (uint64_t)jedges, last_key, UINT32_MAX});
             open_jumps.push_back(g_jumps.size() - 1);
+            continue;
+        }
+        unsigned sframe;
+        char skey[128];
+        int sused = 0;
+        if (sscanf(line, "setting %u %127s %n", &sframe, skey, &sused) == 2 && sused > 0) {
+            std::string value = line + sused;
+            while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) value.pop_back();
+            g_setting_replay.push_back(SettingRecord{sframe, skey, value});
             continue;
         }
         char kind[32];
@@ -255,8 +270,9 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     }
     size_t poses = 0;
     for (const auto& c : g_poses) poses += c.replay.size();
-    fprintf(stderr, "[input] replaying %zu changes over %u %s, %zu clock jumps and %zu pose changes from %s%s%s\n", g_replay.size(),
-            g_replay_last_key, g_replay_by_frame ? "frames" : "polls", g_jumps.size(), poses, path.c_str(),
+    fprintf(stderr, "[input] replaying %zu changes over %u %s, %zu clock jumps, %zu pose changes and %zu settings from %s%s%s\n",
+            g_replay.size(), g_replay_last_key, g_replay_by_frame ? "frames" : "polls", g_jumps.size(), poses,
+            g_setting_replay.size(), path.c_str(),
             memcard_out.empty() ? "" : " (with its card snapshot)",
             g_replay_by_frame ? " (v1 log: keyed by frame, so only approximate)" : "");
     return true;
@@ -267,6 +283,21 @@ void input_log_jump(uint64_t at, uint64_t edges) {
     if (!g_out) return;
     fprintf(g_out, "jump %llu %llu\n", (unsigned long long)at, (unsigned long long)edges);
     fflush(g_out);
+}
+
+void input_log_setting(uint32_t frame, const char* key, const char* value) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_out) return;
+    fprintf(g_out, "setting %u %s %s\n", frame, key, value);
+    fflush(g_out);
+}
+
+void input_replay_settings(uint32_t frame, void (*fn)(const char* key, const char* value)) {
+    // Only the guest thread applies them, so the position needs no lock.
+    while (g_setting_pos < g_setting_replay.size() && g_setting_replay[g_setting_pos].frame <= frame) {
+        const SettingRecord& r = g_setting_replay[g_setting_pos++];
+        fn(r.key.c_str(), r.value.c_str());
+    }
 }
 
 uint64_t input_replay_next_jump_at() { return g_next_jump_at.load(); }

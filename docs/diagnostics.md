@@ -81,6 +81,41 @@ are the game's own: a hook steering the simulation by something a replay does no
 reproduce (the render thread's progress, say), or a diagnostic that reads a pose itself, so
 that a run recorded with it on replays only with it on.
 
+Settings the guest reads are input too (version 5). A setting flagged `AffectsGuest`
+(`runtime/settings.h`) is latched at the guest's frame boundary, so the guest sees one value
+for a whole frame, and every latched value is logged against that submitted frame:
+`setting <frame> <key> <value>`, all of them at frame 0 and each change after. A replay starts
+every such setting at its default, applies the log's lines at their frames, and ignores the
+live values (the menu, `settings.txt`) until it ends. A log from before version 5 has none,
+which is right: it was recorded before any setting existed. Settings only the host reads
+(the window, the internal scale, the aspect ratio, the volume) are not logged and never
+change a replay.
+
+## Settings and the menu
+
+`settings.txt` in the working directory (`--settings=<path>` or `GCN_SETTINGS` for another)
+holds what the in-game menu changed: `key = value` lines, only settings that differ from
+their defaults, and any line this build doesn't know, kept as it was. `--list-settings`
+prints every setting with its default and help. `--set=<key>=<value>` (repeatable) changes
+one for a single run without saving it, as `--scale`, `--fullscreen` and `--aspect` do for
+theirs. The file is written when the menu closes, two seconds after a change while it's
+open, and at exit, through a temporary file. A script that compares a replay's frames
+should pass `--settings=` a file that doesn't exist, so the frames don't depend on the
+machine's settings.
+
+The menu (`runtime/overlay.cpp`) opens with F1, Esc, a controller's Back button, or L + R +
+Start held for a second, and pauses the guest at its next frame boundary
+(`guest_pause_gate`) while it's open: virtual time stands still, the audio device is paused,
+and the pacer is re-anchored on resume, so a pause never reaches the game or its log. Two
+switches check it without a person:
+
+- `GCN_MENU_OPEN=<frame>[:<menu>]` opens it at that presented frame, on that top menu.
+- `GCN_MENU_SHOT=<dir>`, with it, waits until the guest is paused, writes a picture of each
+  top menu to `<dir>/menu_<n>_<name>.png` (the last frame with the menu over it), then quits.
+
+A run with `GCN_MENU_OPEN` leaves the default `settings.txt` alone; with `--settings=<path>`
+it saves to that file as a player's run would, which tests the round trip.
+
 ## Scripted input
 
 `GCN_INPUT="frame:BUTTON:duration,..."` presses buttons at given submitted-frame counts; `+`
