@@ -1,4 +1,5 @@
-// The in-game menu's entries beyond settings (settings.h): buttons, and the order of pages.
+// The in-game menu's entries beyond settings (settings.h): buttons, notes, and the order of
+// pages.
 // Like settings, they are registered from static initializers and frozen when the menu
 // starts; the desktop frontend draws them (overlay.cpp). No SDL and no GL here, so a game's
 // SOURCES can register entries in every target.
@@ -21,6 +22,10 @@ namespace menu {
 void button(const char* path, const char* label, void (*fn)(), const char* help = nullptr,
             const char* confirm = nullptr);
 
+// A line of text at `path`, wrapped to the page: what a page needs said that no setting
+// says, such as where the game keeps a setting of its own.
+void note(const char* path, const char* text);
+
 // The order of a menu's pages (path "Graphics") or of a page's sections ("Graphics/Display"):
 // these first, in this order, then the rest alphabetically.
 void layout(const char* path, std::initializer_list<const char*> children);
@@ -36,6 +41,11 @@ struct Button {
     uint32_t order;
 };
 const std::vector<Button>& buttons();
+struct Note {
+    const char *path, *text;
+    uint32_t order;
+};
+const std::vector<Note>& notes();
 // `children` sorted by layout() for `path`, then alphabetically.
 void sort_children(const std::string& path, std::vector<std::string>& children);
 

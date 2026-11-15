@@ -267,6 +267,7 @@ struct Entry {
     uint32_t order;
     settings::Setting* setting = nullptr;
     const menu::Button* button = nullptr;
+    const menu::Note* note = nullptr;
     const Draw* draw = nullptr;
 };
 using Section = std::vector<Entry>;
@@ -302,6 +303,12 @@ static std::map<std::string, Menu> build_tree() {
         e.order = b.order;
         e.button = &b;
         put(b.path, e);
+    }
+    for (const menu::Note& n : menu::notes()) {
+        Entry e;
+        e.order = n.order;
+        e.note = &n;
+        put(n.path, e);
     }
     for (const Draw& d : draws()) {
         Entry e;
@@ -439,6 +446,7 @@ static void draw_section(const Section& sec, float scale) {
         }
         after_button = false;
         if (e.setting) draw_setting(*e.setting, scale);
+        else if (e.note) ImGui::TextWrapped("%s", e.note->text);
         else if (e.draw) e.draw->fn();
     }
 }

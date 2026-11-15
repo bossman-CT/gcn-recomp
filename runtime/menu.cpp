@@ -8,6 +8,7 @@
 namespace menu {
 
 static std::vector<Button>& button_list() { static auto* v = new std::vector<Button>; return *v; }
+static std::vector<Note>& note_list() { static auto* v = new std::vector<Note>; return *v; }
 static std::map<std::string, std::vector<std::string>>& layouts() {
     static auto* m = new std::map<std::string, std::vector<std::string>>;
     return *m;
@@ -18,6 +19,8 @@ void button(const char* path, const char* label, void (*fn)(), const char* help,
     button_list().push_back(Button{path, label, help, confirm, fn, settings::next_order()});
 }
 
+void note(const char* path, const char* text) { note_list().push_back(Note{path, text, settings::next_order()}); }
+
 void layout(const char* path, std::initializer_list<const char*> children) {
     auto& v = layouts()[path];
     v.assign(children.begin(), children.end());
@@ -27,6 +30,7 @@ bool is_open() { return g_open; }
 void set_open(bool open) { g_open = open; }
 
 const std::vector<Button>& buttons() { return button_list(); }
+const std::vector<Note>& notes() { return note_list(); }
 
 void sort_children(const std::string& path, std::vector<std::string>& children) {
     const auto it = layouts().find(path);
