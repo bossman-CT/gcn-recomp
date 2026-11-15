@@ -70,8 +70,11 @@ The game project provides:
 - `runtime/`: the GameCube in software. `recomp.h` is the contract with generated code.
   `cpu.cpp`, `threads.cpp` and `hle_os.cpp` are the CPU and OS; `hw/` the hardware
   registers; `gx/` the graphics pipeline; `main.cpp` the SDL frontend and `bench_main.cpp`
-  the benchmark. `input_map.*` binds any joystick or key to the pad from a `controls.txt`
-  (wheels, pedals, button boxes), and its `--list-controls` prints what to write for each;
+  the benchmark. `input_ports.*` puts each game controller on a port of its own (1 to 4,
+  the keyboard on port 1), with a positional or modern face-button layout and gyro aiming
+  per port. `input_map.*` binds any joystick, key or gamepad control to a port's pad from a
+  `controls.txt` (wheels, pedals, button boxes, remapping), and its `--list-controls` prints
+  what to write for each;
   `ffb.*` is the wheel's force feedback, from the game's `telemetry::Motion` and the pad's
   rumble motor.
 - `openxr/`: the OpenXR frontend (the game on a theater panel or in stereo, the headset's

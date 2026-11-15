@@ -2,6 +2,7 @@
 #include "input_map.h"
 #include "ffb.h"
 #include "input_defaults.h"
+#include "input_ports.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -40,7 +41,9 @@ const TargetName kTargets[] = {
 
 bool bipolar(Target t) { return t >= Target::StickX && t <= Target::CStickY; }
 
-enum class Kind { Key, Button, Hat, Axis };
+// Gamepad: the port's game controller, by SDL's names for its controls. None: no source,
+// only taking the control's default gamepad source away.
+enum class Kind { Key, Button, Hat, Axis, Gamepad, None };
 enum class Half { Whole, Plus, Minus };
 
 struct Binding {
@@ -56,7 +59,34 @@ struct Binding {
     bool invert = false;
     float deadzone = -1.0f, gain = 1.0f, threshold = -1.0f;
     SDL_Joystick* joy = nullptr;  // resolved whenever a device comes or goes
+    int pad_button = -1, pad_axis = -1;  // Kind::Gamepad
+    // Where it applies: a bit per port, and the controller types of a type section.
+    uint8_t ports = 1;
+    unsigned types = ~0u;
 };
+
+// A per-port setting (input_ports.h), with where it applies. `level` orders the scopes:
+// the most specific line wins, and among equals the last.
+struct SettingLine {
+    std::string key, value;
+    uint8_t ports;
+    unsigned types;
+    int level;  // 0 every port, 1 a controller type, 2 one port
+};
+std::vector<SettingLine> g_settings;
+
+// The section a line is in: `[port 2]`, `[ps4]`, `[all]`, or none yet.
+struct Section {
+    uint8_t ports = 1;      // bindings before any section are port 1's, as they always were
+    uint8_t set_ports = 0xF;  // ...and settings there are every port's
+    unsigned types = ~0u;
+    int level = 0;
+};
+
+bool applies(uint8_t ports, unsigned types, int port, int type) {
+    if (!(ports >> port & 1)) return false;
+    return types == ~0u || (type >= 0 && (types >> type & 1));
+}
 
 std::string g_path;
 std::vector<Binding> g_bindings;
@@ -123,7 +153,7 @@ void attach_wheel() {
 
 void resolve() {
     for (auto& b : g_bindings)
-        if (b.kind != Kind::Key) b.joy = find_device(b.device, b.nth);
+        if (b.kind == Kind::Button || b.kind == Kind::Hat || b.kind == Kind::Axis) b.joy = find_device(b.device, b.nth);
     attach_wheel();
 }
 
@@ -227,7 +257,24 @@ bool parse_line(const std::vector<std::string>& w, Binding& b, std::string& err)
         if (!SDL_strcasecmp(t.name, w[0].c_str())) { b.target = t.t; found = true; }
     if (!found) { err = "unknown pad control \"" + w[0] + "\""; return false; }
     size_t i = 2;
-    if (w[i] == "key") {
+    if (w[i] == "none") {
+        b.kind = Kind::None;
+        i++;
+    } else if (w[i] == "gamepad") {
+        if (i + 1 >= w.size()) { err = "gamepad: which control?"; return false; }
+        b.kind = Kind::Gamepad;
+        std::string name = w[i + 1];
+        if (name.size() > 1 && (name.back() == '+' || name.back() == '-')) {
+            b.half = name.back() == '+' ? Half::Plus : Half::Minus;
+            name.pop_back();
+        }
+        if (!input_map_gamepad_control(name, b.pad_button, b.pad_axis)) {
+            err = "unknown gamepad control \"" + w[i + 1] + "\" (a b x y, leftshoulder, lefttrigger, leftx, dpup...)";
+            return false;
+        }
+        if (b.pad_button >= 0 && b.half != Half::Whole) { err = "only an axis has halves"; return false; }
+        i += 2;
+    } else if (w[i] == "key") {
         if (i + 1 >= w.size()) { err = "key: which key?"; return false; }
         b.kind = Kind::Key;
         b.key = SDL_GetScancodeFromName(w[i + 1].c_str());
@@ -270,27 +317,51 @@ bool parse_line(const std::vector<std::string>& w, Binding& b, std::string& err)
     // A whole axis onto a stick axis has a sliver of a dead zone unless the line gives one:
     // the stick's range starts where the game's response does (g_range), so the slightest
     // jitter at the centre would otherwise already be a step.
-    if (b.deadzone < 0.0f) b.deadzone = b.kind == Kind::Axis && b.half == Half::Whole && bipolar(b.target) ? 0.005f : 0.0f;
+    // A gamepad's stick is looser than a wheel: as much again as the default mapping's.
+    const bool pad_stick = b.kind == Kind::Gamepad && b.pad_axis >= 0 && b.pad_axis < SDL_CONTROLLER_AXIS_TRIGGERLEFT;
+    if (b.deadzone < 0.0f)
+        b.deadzone = pad_stick ? 0.12f : b.kind == Kind::Axis && b.half == Half::Whole && bipolar(b.target) ? 0.005f : 0.0f;
     if (b.deadzone >= 1.0f) { err = "deadzone must be from 0 to below 1"; return false; }
     if (b.threshold < 0.0f) b.threshold = (b.target == Target::L || b.target == Target::R) ? 0.85f : 0.5f;
     return true;
 }
 
-// A binding's value: -1 to +1 onto a whole stick axis, 0 to 1 onto anything else.
-float value(const Binding& b, const uint8_t* keys) {
+// An axis reading, -1 to 1, as the binding takes it.
+float shape_axis(const Binding& b, float a) {
+    if (b.invert) a = -a;
+    if (b.half == Half::Plus) return std::max(a, 0.0f);
+    if (b.half == Half::Minus) return std::max(-a, 0.0f);
+    if (bipolar(b.target)) return a;
+    return (a + 1.0f) * 0.5f;
+}
+
+// A binding's value: -1 to +1 onto a whole stick axis, 0 to 1 onto anything else. `pad` is
+// the port's game controller, for gamepad sources.
+float value(const Binding& b, const uint8_t* keys, SDL_GameController* pad) {
     float v = 0.0f;
     switch (b.kind) {
+    case Kind::None: return 0.0f;
     case Kind::Key: v = keys[b.key] ? 1.0f : 0.0f; break;
     case Kind::Button: v = b.joy && SDL_JoystickGetButton(b.joy, b.index) ? 1.0f : 0.0f; break;
     case Kind::Hat: v = b.joy && (SDL_JoystickGetHat(b.joy, b.index) & b.hat_dir) ? 1.0f : 0.0f; break;
-    case Kind::Axis: {
+    case Kind::Axis:
         if (!b.joy) return 0.0f;
-        float a = std::clamp(SDL_JoystickGetAxis(b.joy, b.index) / 32767.0f, -1.0f, 1.0f);
-        if (b.invert) a = -a;
-        if (b.half == Half::Plus) v = std::max(a, 0.0f);
-        else if (b.half == Half::Minus) v = std::max(-a, 0.0f);
-        else if (bipolar(b.target)) v = a;
-        else v = (a + 1.0f) * 0.5f;
+        v = shape_axis(b, std::clamp(SDL_JoystickGetAxis(b.joy, b.index) / 32767.0f, -1.0f, 1.0f));
+        break;
+    case Kind::Gamepad: {
+        if (!pad) return 0.0f;
+        if (b.pad_button >= 0) {
+            v = SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)b.pad_button) ? 1.0f : 0.0f;
+            break;
+        }
+        float a = std::clamp(SDL_GameControllerGetAxis(pad, (SDL_GameControllerAxis)b.pad_axis) / 32767.0f, -1.0f, 1.0f);
+        if (b.pad_axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || b.pad_axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+            v = b.invert ? 1.0f - a : a;  // already 0 to 1
+            break;
+        }
+        // Up is positive, as on the pad; SDL has it the other way.
+        if (b.pad_axis == SDL_CONTROLLER_AXIS_LEFTY || b.pad_axis == SDL_CONTROLLER_AXIS_RIGHTY) a = -a;
+        v = shape_axis(b, a);
         break;
     }
     }
@@ -309,6 +380,57 @@ uint8_t stick_byte(int a, float v) {
     return (uint8_t)std::clamp(128 + (v < 0.0f ? -off : off), 0, 255);
 }
 
+// `[port 2]`, `[all]`, `[ps4]`: true if the line is a section header, `err` saying what is
+// wrong with it if it is a bad one.
+bool parse_section(const char* line, Section& s, std::string& err) {
+    const char* p = line;
+    while (isspace((unsigned char)*p)) p++;
+    if (*p != '[') return false;
+    const char* e = strchr(p, ']');
+    if (!e) { err = "no closing ]"; return true; }
+    std::string name;
+    for (const char* q = p + 1; q < e; q++) name += (char)tolower((unsigned char)*q);
+    std::vector<std::string> w;
+    tokenize(name.c_str(), w, err);
+    int n = 0;
+    if (w.size() == 2 && w[0] == "port" && parse_int(w[1], n) && n >= 1 && n <= 4) {
+        s.ports = s.set_ports = (uint8_t)(1 << (n - 1));
+        s.types = ~0u;
+        s.level = 2;
+        return true;
+    }
+    if (w.size() == 1 && w[0] == "all") { s.ports = s.set_ports = 0xF; s.types = ~0u; s.level = 0; return true; }
+    if (w.size() == 1)
+        if (const unsigned m = input_ports::type_mask(w[0])) {
+            s.ports = s.set_ports = 0xF;
+            s.types = m;
+            s.level = 1;
+            return true;
+        }
+    err = "unknown section [" + name + "]: [port 1] to [port 4], [all], or a controller type (xbox, playstation, nintendo, ps4...)";
+    return true;
+}
+
+const struct { Target t; uint16_t bit; } kButtons[] = {
+    {Target::A, PAD_A}, {Target::B, PAD_B}, {Target::X, PAD_X}, {Target::Y, PAD_Y},
+    {Target::Z, PAD_Z}, {Target::Start, PAD_START},
+    {Target::DUp, PAD_UP}, {Target::DDown, PAD_DOWN}, {Target::DLeft, PAD_LEFT}, {Target::DRight, PAD_RIGHT},
+    {Target::L, PAD_L}, {Target::R, PAD_R},
+};
+
+// The bits of input_map_gamepad_override a pad control is.
+uint32_t control_bits(Target t) {
+    for (const auto& k : kButtons)
+        if (k.t == t) return k.bit;
+    switch (t) {
+    case Target::StickX: case Target::StickLeft: case Target::StickRight: return INPUT_MAP_STICK_X;
+    case Target::StickY: case Target::StickUp: case Target::StickDown: return INPUT_MAP_STICK_Y;
+    case Target::CStickX: case Target::CStickLeft: case Target::CStickRight: return INPUT_MAP_CSTICK_X;
+    case Target::CStickY: case Target::CStickUp: case Target::CStickDown: return INPUT_MAP_CSTICK_Y;
+    default: return 0;
+    }
+}
+
 void print_targets() {
     fprintf(stderr, "Pad controls:");
     for (const auto& t : kTargets) fprintf(stderr, " %s", t.name);
@@ -320,6 +442,7 @@ void print_targets() {
 bool input_map_load(const char* path) {
     g_path = path;
     g_bindings.clear();
+    g_settings.clear();
     g_ffb = FfbSettings();
     g_ffb_device.clear();
     for (int a = 0; a < 4; a++)
@@ -329,17 +452,30 @@ bool input_map_load(const char* path) {
     char line[512];
     int n = 0;
     bool ok = true;
+    Section sec;
     while (fgets(line, sizeof(line), f)) {
         n++;
         std::vector<std::string> w;
         std::string err;
         Binding b;
         b.line = n;
-        if (tokenize(line, w, err)) {
+        if (parse_section(line, sec, err)) {
+            if (err.empty()) continue;
+        } else if (tokenize(line, w, err)) {
             if (w.empty()) continue;
             if (parse_range(w, err)) continue;
-            if (err.empty() && (w[0].compare(0, 3, "ffb") == 0 ? parse_ffb(w, err) : parse_line(w, b, err))) {
-                if (w[0].compare(0, 3, "ffb") != 0) g_bindings.push_back(b);
+            if (err.empty() && input_ports::is_setting(w[0])) {
+                if (w.size() != 3 || w[1] != "=") err = "expected " + w[0] + " = <value>";
+                else if (input_ports::check_setting(w[0], w[2], err)) {
+                    g_settings.push_back({w[0], w[2], sec.set_ports, sec.types, sec.level});
+                    continue;
+                }
+            } else if (err.empty() && (w[0].compare(0, 3, "ffb") == 0 ? parse_ffb(w, err) : parse_line(w, b, err))) {
+                if (w[0].compare(0, 3, "ffb") != 0) {
+                    b.ports = sec.ports;
+                    b.types = sec.types;
+                    g_bindings.push_back(b);
+                }
                 continue;
             }
         }
@@ -348,6 +484,7 @@ bool input_map_load(const char* path) {
     }
     fclose(f);
     fprintf(stderr, "%s: %zu binding%s", path, g_bindings.size(), g_bindings.size() == 1 ? "" : "s");
+    if (!g_settings.empty()) fprintf(stderr, ", %zu setting%s", g_settings.size(), g_settings.size() == 1 ? "" : "s");
     for (int a = 0; a < 4; a++)
         if (g_range[a][0] != 0.0f || g_range[a][1] != 100.0f)
             fprintf(stderr, ", %.*s %g to %g", (int)strlen(kRangeKeys[a][0]) - 4, kRangeKeys[a][0], g_range[a][0], g_range[a][1]);
@@ -361,7 +498,7 @@ bool input_map_load(const char* path) {
 bool input_map_binds_index(int device_index) {
     const char* name = SDL_JoystickNameForIndex(device_index);
     for (const auto& b : g_bindings)
-        if (b.kind != Kind::Key && same_name(name, b.device)) return true;
+        if ((b.kind == Kind::Button || b.kind == Kind::Hat || b.kind == Kind::Axis) && same_name(name, b.device)) return true;
     return false;
 }
 
@@ -386,25 +523,20 @@ void input_map_event(const SDL_Event& e) {
     }
 }
 
-void input_map_apply(PadState& p) {
-    ffb_update(pad_motor(0));
+void input_map_apply(int port, PadState& p, SDL_GameController* pad, int type) {
+    if (port == 0) ffb_update(pad_motor(0));
     if (g_bindings.empty()) return;
     const uint8_t* keys = SDL_GetKeyboardState(nullptr);
     float v[(int)Target::Count] = {};
     bool pressed[(int)Target::Count] = {};
     for (const auto& b : g_bindings) {
-        const float x = value(b, keys);
+        if (b.kind == Kind::None || !applies(b.ports, b.types, port, type)) continue;
+        const float x = value(b, keys, pad);
         float& acc = v[(int)b.target];
         if (bipolar(b.target)) acc += x;
         else acc = std::max(acc, x);
         if (x > b.threshold) pressed[(int)b.target] = true;
     }
-    static const struct { Target t; uint16_t bit; } kButtons[] = {
-        {Target::A, PAD_A}, {Target::B, PAD_B}, {Target::X, PAD_X}, {Target::Y, PAD_Y},
-        {Target::Z, PAD_Z}, {Target::Start, PAD_START},
-        {Target::DUp, PAD_UP}, {Target::DDown, PAD_DOWN}, {Target::DLeft, PAD_LEFT}, {Target::DRight, PAD_RIGHT},
-        {Target::L, PAD_L}, {Target::R, PAD_R},
-    };
     for (const auto& k : kButtons)
         if (pressed[(int)k.t]) p.buttons |= k.bit;
     auto trig = [&](Target t, uint8_t& out) {
@@ -422,6 +554,57 @@ void input_map_apply(PadState& p) {
     stick(1, Target::StickY, Target::StickDown, Target::StickUp, p.stick_y);
     stick(2, Target::CStickX, Target::CStickLeft, Target::CStickRight, p.cstick_x);
     stick(3, Target::CStickY, Target::CStickDown, Target::CStickUp, p.cstick_y);
+}
+
+uint32_t input_map_gamepad_override(int port, int type) {
+    uint32_t m = 0;
+    for (const auto& b : g_bindings)
+        if ((b.kind == Kind::Gamepad || b.kind == Kind::None) && applies(b.ports, b.types, port, type)) m |= control_bits(b.target);
+    return m;
+}
+
+const char* input_map_setting(int port, int type, const char* key) {
+    const SettingLine* best = nullptr;
+    for (const auto& l : g_settings)
+        if (l.key == key && applies(l.ports, l.types, port, type) && (!best || l.level >= best->level)) best = &l;
+    return best ? best->value.c_str() : nullptr;
+}
+
+bool input_map_gamepad_control(const std::string& name_in, int& button, int& axis) {
+    std::string name;
+    for (char c : name_in) name += (char)tolower((unsigned char)c);
+    // The names printed on PlayStation and Xbox controllers, and the compass for the face.
+    static const struct { const char* name; int button, axis; } kAliases[] = {
+        {"cross", SDL_CONTROLLER_BUTTON_A, -1}, {"circle", SDL_CONTROLLER_BUTTON_B, -1},
+        {"square", SDL_CONTROLLER_BUTTON_X, -1}, {"triangle", SDL_CONTROLLER_BUTTON_Y, -1},
+        {"south", SDL_CONTROLLER_BUTTON_A, -1}, {"east", SDL_CONTROLLER_BUTTON_B, -1},
+        {"west", SDL_CONTROLLER_BUTTON_X, -1}, {"north", SDL_CONTROLLER_BUTTON_Y, -1},
+        {"l1", SDL_CONTROLLER_BUTTON_LEFTSHOULDER, -1}, {"r1", SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, -1},
+        {"lb", SDL_CONTROLLER_BUTTON_LEFTSHOULDER, -1}, {"rb", SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, -1},
+        {"l2", -1, SDL_CONTROLLER_AXIS_TRIGGERLEFT}, {"r2", -1, SDL_CONTROLLER_AXIS_TRIGGERRIGHT},
+        {"lt", -1, SDL_CONTROLLER_AXIS_TRIGGERLEFT}, {"rt", -1, SDL_CONTROLLER_AXIS_TRIGGERRIGHT},
+        {"l3", SDL_CONTROLLER_BUTTON_LEFTSTICK, -1}, {"r3", SDL_CONTROLLER_BUTTON_RIGHTSTICK, -1},
+        {"ls", SDL_CONTROLLER_BUTTON_LEFTSTICK, -1}, {"rs", SDL_CONTROLLER_BUTTON_RIGHTSTICK, -1},
+        {"share", SDL_CONTROLLER_BUTTON_BACK, -1}, {"view", SDL_CONTROLLER_BUTTON_BACK, -1},
+        {"options", SDL_CONTROLLER_BUTTON_START, -1}, {"menu", SDL_CONTROLLER_BUTTON_START, -1},
+        {"ps", SDL_CONTROLLER_BUTTON_GUIDE, -1},
+    };
+    for (const auto& a : kAliases)
+        if (name == a.name) { button = a.button; axis = a.axis; return true; }
+    const SDL_GameControllerButton bt = SDL_GameControllerGetButtonFromString(name.c_str());
+    if (bt != SDL_CONTROLLER_BUTTON_INVALID) { button = bt; axis = -1; return true; }
+    if (!name.empty() && name[0] != '+' && name[0] != '-') {
+        const SDL_GameControllerAxis ax = SDL_GameControllerGetAxisFromString(name.c_str());
+        if (ax != SDL_CONTROLLER_AXIS_INVALID) { button = -1; axis = ax; return true; }
+    }
+    return false;
+}
+
+std::string input_map_device_label(SDL_Joystick* j) { return device_label(j); }
+
+void input_map_stick_range(int axis, float& lo, float& hi) {
+    lo = g_range[axis][0];
+    hi = g_range[axis][1];
 }
 
 void input_map_shutdown() { ffb_shutdown(); }
@@ -452,10 +635,11 @@ std::string quoted_key(SDL_Scancode sc) {
 
 int input_map_probe() {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    std::vector<std::pair<SDL_JoystickID, int>> pad_axes_out;  // a gamepad axis reported, not yet back
     // A window, for the keyboard: keys reach only a focused window. Joysticks are read
     // whether or not it has focus.
     SDL_Window* win = SDL_CreateWindow("Press or move a control (Escape quits)", SDL_WINDOWPOS_CENTERED,
@@ -494,6 +678,34 @@ int input_map_probe() {
                     int16_t rest = 0;
                     if (!SDL_JoystickGetAxisInitialState(j, a, &rest)) rest = SDL_JoystickGetAxis(j, a);
                     axes.push_back({j, a, rest, SDL_GetTicks() + kSettleMs});
+                }
+                break;
+            }
+            // A game controller also binds as `gamepad <control>`, on whichever port it is.
+            case SDL_CONTROLLERDEVICEADDED: {
+                SDL_GameController* c = SDL_GameControllerOpen(e.cdevice.which);
+                if (!c) break;
+                printf("  a game controller (%s%s): its controls also bind as \"gamepad <control>\"\n",
+                       input_ports::type_name((int)SDL_GameControllerGetType(c)),
+                       SDL_GameControllerHasSensor(c, SDL_SENSOR_GYRO) ? ", with a gyro" : "");
+                break;
+            }
+            case SDL_CONTROLLERBUTTONDOWN:
+                if (settled(e.cbutton.which))
+                    printf("gamepad %s\n", SDL_GameControllerGetStringForButton((SDL_GameControllerButton)e.cbutton.button));
+                break;
+            case SDL_CONTROLLERAXISMOTION: {
+                const std::pair<SDL_JoystickID, int> k{e.caxis.which, e.caxis.axis};
+                auto it = std::find(pad_axes_out.begin(), pad_axes_out.end(), k);
+                const bool trigger = e.caxis.axis >= SDL_CONTROLLER_AXIS_TRIGGERLEFT;
+                if (it != pad_axes_out.end()) {
+                    if (abs(e.caxis.value) < 6000) pad_axes_out.erase(it);
+                } else if (abs(e.caxis.value) >= 16000 && settled(e.caxis.which)) {
+                    pad_axes_out.push_back(k);
+                    const char* name = SDL_GameControllerGetStringForAxis((SDL_GameControllerAxis)e.caxis.axis);
+                    const bool y = e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY || e.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY;
+                    if (trigger) printf("gamepad %s\n", name);
+                    else printf("gamepad %s%c\n", name, (e.caxis.value > 0) != y ? '+' : '-');  // up positive
                 }
                 break;
             }
@@ -584,7 +796,7 @@ int input_map_test_ffb(const char* path) {
         ffb_update(now % 4000 < 500);
         if (steer && steer->joy && now - shown >= 100) {
             shown = now;
-            const float v = value(*steer, SDL_GetKeyboardState(nullptr));
+            const float v = value(*steer, SDL_GetKeyboardState(nullptr), nullptr);
             const int at = (int)std::lround((v + 1.0f) * 20.0f);
             char bar[42];
             for (int i = 0; i < 41; i++) bar[i] = i == at ? '#' : i == 20 ? '|' : '-';

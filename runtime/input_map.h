@@ -39,6 +39,23 @@
 // the default keyboard and gamepad mapping, which stays on except for a device the file
 // names.
 //
+// The port's own controller (input_ports.h) is a source too, by SDL's names for a standard
+// controller's controls, with the stick axes up and right positive:
+//   gamepad <control>             a b x y, leftshoulder, dpup, lefttrigger, leftx, ...
+//   gamepad <axis>+ / <axis>-     one half of a stick axis
+// A pad control bound from the gamepad, or to `none`, loses its default gamepad source on
+// that port, so `A = gamepad b` and `B = gamepad a` swap the two, and `Z = none` frees the
+// button for something else. A stick axis bound from the gamepad has a dead zone of 0.12
+// unless the line gives one.
+//
+// Sections. Lines before any section bind port 1, as they always have; settings there
+// apply to every port. After a `[port 2]` line, bindings and settings are port 2's. After
+// `[all]`, every port's. After a controller type -- `[ps4]`, `[playstation]`, `[xbox]`,
+// `[nintendo]`, input_ports::type_mask -- they apply to every port that type of
+// controller is on. A setting from a port's section wins over a type's, which wins over
+// one for every port; among equals the last line wins. The per-port settings (`layout`,
+// `gyro`, `device`, ...) are input_ports.h's. Force feedback and stick ranges stay global.
+//
 // --list-controls runs input_map_probe() instead of the game: it prints the devices and,
 // for each control pressed or moved, the source to paste into the file.
 //
@@ -56,8 +73,21 @@
 // (input_defaults.h); by default they are 0 and 100.
 #pragma once
 #include "hw/pad.h"
+#include <cstdint>
+#include <string>
 
 union SDL_Event;
+struct _SDL_Joystick;
+typedef struct _SDL_Joystick SDL_Joystick;
+struct _SDL_GameController;
+typedef struct _SDL_GameController SDL_GameController;
+
+// input_map_gamepad_override's bits beyond the buttons' (PAD_*, PAD_L and PAD_R for the
+// triggers too): the stick axes.
+enum : uint32_t {
+    INPUT_MAP_STICK_X = 0x10000, INPUT_MAP_STICK_Y = 0x20000,
+    INPUT_MAP_CSTICK_X = 0x40000, INPUT_MAP_CSTICK_Y = 0x80000,
+};
 
 // Reads the file; true if there is none. Problems are reported on stderr, line by line,
 // and the lines skipped.
@@ -67,8 +97,23 @@ void input_map_event(const SDL_Event& e);
 // Whether the file names the joystick at this SDL device index (the default gamepad
 // mapping leaves such a device alone).
 bool input_map_binds_index(int device_index);
-// The file's bindings, merged into `p`.
-void input_map_apply(PadState& p);
+// The file's bindings for port `port` (0 to 3), merged into `p`. `pad` is the port's game
+// controller (or null) for gamepad sources, and `type` its SDL_GameControllerType (-1 for
+// none) for the type sections. Port 0 also runs the wheel's force feedback.
+void input_map_apply(int port, PadState& p, SDL_GameController* pad, int type);
+// The pad controls the file takes from the default gamepad mapping on this port: PAD_*
+// bits and INPUT_MAP_STICK_*.
+uint32_t input_map_gamepad_override(int port, int type);
+// The file's value for a per-port setting (input_ports.h) on this port, or null.
+const char* input_map_setting(int port, int type, const char* key);
+// A gamepad control's name: its SDL_GameControllerButton in `button`, or its axis in
+// `axis`, the other -1. False for a name it doesn't know.
+bool input_map_gamepad_control(const std::string& name, int& button, int& axis);
+// How the file names a device: its SDL name, and "#n" if it is not the first of that name.
+std::string input_map_device_label(SDL_Joystick* j);
+// A stick axis's range (0 stick_x, 1 stick_y, 2 cstick_x, 3 cstick_y), in the pad's units
+// from the centre: where the game starts to respond and where it is at full.
+void input_map_stick_range(int axis, float& lo, float& hi);
 // Stops the wheel's force feedback (ffb.h), before the program exits.
 void input_map_shutdown();
 // The --list-controls loop. SDL must not be initialised yet. Returns the exit code.

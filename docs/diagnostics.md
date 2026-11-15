@@ -93,6 +93,12 @@ numbers the dumps carry; `GCN_INPUT_LOG=1` shows the count. It prints each press
 scripted press is recorded in the input log like any other, so a script is one way to make
 a log.
 
+A press for another port than the first has the port in front: `2/900:A:10` presses A on
+port 2. A port the script presses anything on reads as plugged in for the whole run, as if
+a controller were in it, so a script can stand in for a second player. The log records each
+port's state on its own lines (the `chan` column), and a replay gives each port back what
+it had, so a recording with several players replays as exactly as one with one.
+
 ## Frame dumps
 
 `--hidden --dump-dir=DIR --dump-every=N` runs with the window hidden and writes every Nth
