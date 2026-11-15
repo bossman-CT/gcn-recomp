@@ -60,6 +60,17 @@ at the last change, which can be well before where the run stopped, so a log tha
 one (a run killed from outside) can be given one by hand. Lines can be edited or written
 by hand; `frame` is for the reader.
 
+Markers flag a moment for a later look. While a log is being written (a run or a replay),
+F9 or a controller's right stick click writes `# mark <n> <poll> <frame> <present> <tick>`
+(decimal) and shows "Marked (n)" at the top of the window for a moment: the marker's number
+from 1, the pad polls so far, the submitted frame, the presented frame then on screen (the
+number frame dumps carry, `frame_<present>.png`) and the virtual time. It is a comment, so
+the replayer passes it by, as any older one does: a log with markers replays exactly as it
+would without them, and markers can be added or removed by hand. The GameCube pad has no
+stick clicks, so the click reaches the game only if `controls.txt` maps it to something.
+A script can turn the markers into frame dumps: a replay with `GCN_DUMP_TIMES` listing
+times from a few seconds before each marker to a few after (see "Frame dumps").
+
 A headset's poses are input too. A game hook that reads the controllers or the eyes on
 the guest thread (`vr::hand_pose`, `vr::eye_views`) and steers the game by them -- aiming
 a weapon from a hand, culling to where the viewer is looking -- makes the simulation
@@ -199,6 +210,11 @@ presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of fra
 `GCN_DUMP_FRAMES=<file>` (frame numbers, one per line) writes exactly those frames instead:
 two runs at different frame rates are compared at the same moments by picking, from a log
 of each run's frames and virtual times, the frame each shows at each moment.
+`GCN_DUMP_TIMES=<file>` (virtual times in seconds, one per line) writes the first frame
+presented at or after each time instead, and names it on stderr
+(`[dump] <time> s: frame_<n>.png`), so moments named in time come out right whatever
+frame rate the game ran at around them. The time is read as the frame is presented, which
+is at most the frames in flight after the frame's own, so the pick is within a frame or two.
 `--headless` runs the guest with no renderer at all. A frame shown widescreen (`--aspect`) is
 dumped stretched to its aspect. `GCN_WIDE_LOG=N` reports, every Nth frame, how far past the
 4:3 frame's sides the game still draws (graphics.md, "Widescreen"); `GCN_WIDE_ANCHOR` and

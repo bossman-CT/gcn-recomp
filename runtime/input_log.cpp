@@ -171,6 +171,18 @@ void input_log_end() {
     fflush(g_out);
 }
 
+int input_log_mark(uint32_t present) {
+    static int marks;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_out) return 0;
+    const uint64_t tick = now_ticks();
+    fprintf(g_out, "# mark %d %u %u %u %llu\n", ++marks, g_poll_seq, gx_frames_submitted(), present,
+            (unsigned long long)tick);
+    fflush(g_out);
+    fprintf(stderr, "[input] marker %d at frame %u, %.1f s\n", marks, present, (double)tick / TB_FREQ);
+    return marks;
+}
+
 bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     const std::string path = dir + "/inputs.txt";
     FILE* f = fopen(path.c_str(), "rb");

@@ -166,12 +166,27 @@ static void toggle_fullscreen() {
     SDL_SetWindowFullscreen(g_win, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
 }
 
+// F9 or a controller's right stick click: a marker in the input log at the frame on screen
+// (input_log_mark), for a later look at what the player saw there. The GameCube pad has no
+// stick clicks, so the click is free unless controls.txt maps it; F9 goes no further.
+static bool mark_event(const SDL_Event& e) {
+    const bool key = e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F9;
+    const bool click = e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK;
+    if (!key && !click) return false;
+    char text[32];
+    if (const int n = input_log_mark(gx::present_count())) snprintf(text, sizeof text, "Marked (%d)", n);
+    else snprintf(text, sizeof text, "Not recording: no mark");
+    overlay::toast(text);
+    return key;
+}
+
 // The window's events. False once the user has asked to quit.
 static bool pump_events() {
     SDL_Event e;
     bool running = true;
     while (SDL_PollEvent(&e)) {
         input_map_event(e);
+        if (mark_event(e)) continue;
         if (overlay::handle_event(e)) continue;  // F1, Esc, Back, and everything while the menu is open
         if (e.type == SDL_KEYDOWN && !e.key.repeat && g_win &&
             (e.key.keysym.scancode == SDL_SCANCODE_F11 ||

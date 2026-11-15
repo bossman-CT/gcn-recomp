@@ -566,6 +566,25 @@ static void draw_hint() {
 
 static bool hint_showing() { return s_show_hint && !g_open && g_start_ms && SDL_GetTicks() - g_start_ms < 6000; }
 
+static std::string g_toast;
+static uint32_t g_toast_until;
+void toast(const char* text, uint32_t ms) {
+    g_toast = text;
+    g_toast_until = SDL_GetTicks() + ms;
+}
+static bool toast_showing() { return !g_toast.empty() && (int32_t)(g_toast_until - SDL_GetTicks()) > 0; }
+static void draw_toast() {
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    const float pad = ImGui::GetStyle().WindowPadding.y;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, pad * 2), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.7f);
+    ImGui::Begin("##toast", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted(g_toast.c_str());
+    ImGui::End();
+}
+
 // The frame in framebuffer 0, kept for redraw().
 static void capture_frozen(int w, int h) {
     if (!g_frozen_fbo || w != g_frozen_w || h != g_frozen_h) {
@@ -658,7 +677,7 @@ static void render(int w, int h) {
     if (!g_open)
         for (auto text : menu::hints())
             if ((game_hint = text())) break;
-    if (!g_open && !hint_showing() && !game_hint) return;
+    if (!g_open && !hint_showing() && !game_hint && !toast_showing()) return;
     // The backend makes its GL objects in its first NewFrame; the font atlas is rebuilt
     // after that, so there is one texture for it.
     ImGui_ImplOpenGL3_NewFrame();
@@ -674,6 +693,7 @@ static void render(int w, int h) {
         if (hint_showing()) draw_hint();
         if (game_hint) draw_game_hint(game_hint);
     }
+    if (toast_showing()) draw_toast();
     ImGui::Render();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

@@ -2981,7 +2981,35 @@ static void present(const EfbCopyCmd& c) {
         std::sort(v.begin(), v.end());
         return v;
     }();
-    const bool dump = g_dump_dir && (picked.empty()
+    // GCN_DUMP_TIMES=<file> (virtual times in seconds, one per line) dumps the first frame
+    // presented at or after each instead, and says which on stderr
+    // (`[dump] <time> s: frame_<n>.png`): moments named in time, such as an input log's
+    // markers, whatever frame rate the game ran at there. The time is the guest's clock as
+    // the frame is presented, which is at most the frames in flight past the frame's own.
+    static const std::vector<uint64_t> times = [] {
+        std::vector<uint64_t> v;
+        if (const char* path = getenv("GCN_DUMP_TIMES"))
+            if (FILE* f = fopen(path, "r")) {
+                double s;
+                while (fscanf(f, "%lf", &s) == 1) if (s >= 0) v.push_back((uint64_t)(s * TB_FREQ));
+                fclose(f);
+            }
+        std::sort(v.begin(), v.end());
+        return v;
+    }();
+    static size_t time_pos;
+    static bool timed;  // this frame is due; kept for the second copy of a pair
+    if (!times.empty() && !g_pair_second) {
+        timed = false;
+        const uint64_t now = now_ticks();
+        for (; time_pos < times.size() && times[time_pos] <= now; time_pos++) {
+            timed = true;
+            if (g_dump_dir)
+                fprintf(stderr, "[dump] %.3f s: frame_%05u%s.png\n", (double)times[time_pos] / TB_FREQ, g_present_count,
+                        g_dump_suffix);
+        }
+    }
+    const bool dump = g_dump_dir && (!times.empty() ? timed : picked.empty()
         ? g_dump_every && in_range && g_present_count % g_dump_every == 0
         : std::binary_search(picked.begin(), picked.end(), g_present_count));
     if (xfb) {

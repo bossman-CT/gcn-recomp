@@ -42,6 +42,9 @@ void draw(int w, int h);
 // and this returns true (the caller swaps).
 bool redraw(int w, int h);
 bool quit_requested();
+// A word or two at the top of the screen for `ms`, over the game or the menu: a key's
+// confirmation, such as the input log's marker (input_log_mark). A new one replaces the last.
+void toast(const char* text, uint32_t ms = 1200);
 // At exit: saves settings.txt if anything changed.
 void shutdown();
 

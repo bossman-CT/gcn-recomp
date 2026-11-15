@@ -37,6 +37,16 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out);
 // the last state up to the instant the run stopped.
 void input_log_end();
 
+// A marker: the player saw something worth a second look and pressed the mark key (F9 or a
+// controller's right stick click, main.cpp). Logged as a comment,
+// `# mark <n> <poll> <frame> <present> <tick>`: the marker's number from 1, the pad polls
+// so far, the submitted frame, `present` (the presented frame on screen, which frame dumps
+// are numbered by) and the virtual time. Being a comment, a replay passes it by, and so
+// does any older replayer: a log with markers replays exactly as it would without them.
+// Any thread; the poll and the time are read as they stand. Returns the marker's number,
+// or 0 when no log is being written.
+int input_log_mark(uint32_t present);
+
 // Called by the SI layer each time the guest polls a pad, with the live state in `s`.
 // While a replay is loaded and not yet past its end, overwrites `s` with the logged state
 // for `chan` and returns true; past the end the live controller takes over again and this
