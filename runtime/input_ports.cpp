@@ -2,6 +2,7 @@
 #include "input_ports.h"
 #include "input_map.h"
 #include "input_script.h"
+#include "menu.h"
 #include "runtime.h"
 #include "settings.h"
 #include <algorithm>
@@ -296,7 +297,8 @@ void add_to_stick(int axis, float v, uint8_t& out) {
 
 void gyro(Port& P, PadState& p) {
     const Config& c = P.cfg;
-    const bool want = c.gyro != 0 && P.has_gyro;
+    const bool taken = wanted((int)(&P - g_ports)) & WantGyro;  // a filter reads it from Raw instead
+    const bool want = (c.gyro != 0 || taken) && P.has_gyro;
     if (want != P.gyro_on) {
         SDL_GameControllerSetSensorEnabled(P.ctl, SDL_SENSOR_GYRO, want ? SDL_TRUE : SDL_FALSE);
         P.gyro_on = want;
@@ -334,9 +336,56 @@ void gyro(Port& P, PadState& p) {
         P.gx = x;
         P.gy = y;
     }
+    if (taken) return;
     const bool on_main = c.gyro == 1;
     add_to_stick(on_main ? 0 : 2, P.gx * c.sensitivity / 100.0f, on_main ? p.stick_x : p.cstick_x);
     add_to_stick(on_main ? 1 : 3, P.gy * c.sensitivity / 100.0f, on_main ? p.stick_y : p.cstick_y);
+}
+
+// ---- the mouse, for a filter that wants it (Raw) ----
+bool g_relative;            // relative mouse mode is on
+float g_mdx, g_mdy;         // motion since the last update
+int g_wheel;
+
+// Relative mode while port 1's filter wants the mouse, the menu is closed and the window has
+// the keyboard focus; the motion since the last update, and the buttons, into `r`.
+void mouse(Raw& r) {
+    const bool on = (wanted(0) & WantMouse) && !menu::is_open() && SDL_GetKeyboardFocus() != nullptr;
+    if (on != g_relative) {
+        SDL_SetRelativeMouseMode(on ? SDL_TRUE : SDL_FALSE);
+        g_relative = on;
+        g_mdx = g_mdy = 0.0f;
+        g_wheel = 0;
+    }
+    if (!on) return;
+    r.mouse = true;
+    r.mx = g_mdx;
+    r.my = g_mdy;
+    r.wheel = g_wheel;
+    const uint32_t b = SDL_GetMouseState(nullptr, nullptr);
+    r.mbuttons = (b & SDL_BUTTON_LMASK ? 1u : 0u) | (b & SDL_BUTTON_MMASK ? 2u : 0u) | (b & SDL_BUTTON_RMASK ? 4u : 0u) |
+                 (b & SDL_BUTTON_X1MASK ? 8u : 0u) | (b & SDL_BUTTON_X2MASK ? 16u : 0u);
+    g_mdx = g_mdy = 0.0f;
+    g_wheel = 0;
+}
+
+// The port's controller as it is, for Raw.
+void read_raw(int port, Raw& r) {
+    const Port& P = g_ports[port];
+    if (P.ctl) {
+        auto ax = [&](SDL_GameControllerAxis a) { return std::clamp(SDL_GameControllerGetAxis(P.ctl, a) / 32767.0f, -1.0f, 1.0f); };
+        r.pad = true;
+        r.lx = ax(SDL_CONTROLLER_AXIS_LEFTX);
+        r.ly = -ax(SDL_CONTROLLER_AXIS_LEFTY);
+        r.rx = ax(SDL_CONTROLLER_AXIS_RIGHTX);
+        r.ry = -ax(SDL_CONTROLLER_AXIS_RIGHTY);
+        if (P.gyro_on && (wanted(port) & WantGyro)) {
+            r.gyro = true;
+            r.gx = P.gx;
+            r.gy = P.gy;
+        }
+    }
+    if (port == 0) mouse(r);
 }
 
 // ---- the menu: Controls > Controller ----
@@ -386,7 +435,12 @@ void init() {
 }
 
 void event(const SDL_Event& e) {
-    if (e.type == SDL_CONTROLLERDEVICEADDED) {
+    if (e.type == SDL_MOUSEMOTION && g_relative) {
+        g_mdx += (float)e.motion.xrel;
+        g_mdy += (float)e.motion.yrel;
+    } else if (e.type == SDL_MOUSEWHEEL && g_relative) {
+        g_wheel += e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y;
+    } else if (e.type == SDL_CONTROLLERDEVICEADDED) {
         assign_all();
     } else if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
         g_said_full.erase(std::remove(g_said_full.begin(), g_said_full.end(), e.cdevice.which), g_said_full.end());
@@ -427,6 +481,9 @@ void update() {
         if (p.connected) merge(port, p);
         // Scripted presses stand in for a controller, so the game's filters see them too.
         input_script_apply(p, port);
+        Raw r;
+        read_raw(port, r);
+        set_raw(port, r);
         run_filters(port, p);
         if (g_filter) g_filter(port, p);
         pad_set_state(port, p);

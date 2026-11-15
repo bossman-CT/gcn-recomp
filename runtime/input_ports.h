@@ -74,6 +74,33 @@ void add_filter(void (*fn)(int port, PadState& p));
 // in the benchmark too.
 void run_filters(int port, PadState& p);
 
+// What drives a port, before any mapping, for a filter with its own idea of how a
+// controller should play (a game's aiming scheme). Filled by the desktop frontend each
+// update; elsewhere it stays empty.
+struct Raw {
+    bool pad = false;                      // a game controller drives the port
+    float lx = 0, ly = 0, rx = 0, ry = 0;  // its sticks, -1 to 1, right and up positive, no dead zone
+    bool gyro = false;                     // its gyro, while wanted (below) and it has one
+    float gx = 0, gy = 0;                  // degrees a second, right and up positive, after the port's
+                                           // gyro dead zone, smoothing, hold control and inversion
+    bool mouse = false;                    // the mouse, on port 1, while wanted and captured
+    float mx = 0, my = 0;                  // its motion since the last update, in counts, right and down positive
+    unsigned mbuttons = 0;                 // held: 1 left, 2 middle, 4 right, 8 and 16 the side buttons
+    int wheel = 0;                         // notches since the last update, away from the player positive
+};
+enum Want : unsigned { WantGyro = 1, WantMouse = 2 };
+// The port's raw input for the current update. False, leaving `out` empty, where nothing
+// provides it.
+bool raw(int port, Raw& out);
+// What a filter wants on this port, kept until changed: WantGyro reads the gyro even with the
+// port's gyro setting off and adds it to no stick (the filter uses Raw's instead);
+// WantMouse, on port 1, captures the mouse in relative mode, which the menu releases while
+// it is open and the window gives up when it loses focus.
+void want(int port, unsigned what);
+// For the frontend: what was wanted, and the raw input it read.
+unsigned wanted(int port);
+void set_raw(int port, const Raw& r);
+
 // Whether the port reads as plugged in.
 bool connected(int port);
 // What drives the port, for a menu or a message: `"<device>" (<type>)`, or "" for nothing.
