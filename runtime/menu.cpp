@@ -14,6 +14,10 @@ static std::map<std::string, std::vector<std::string>>& layouts() {
     return *m;
 }
 static std::atomic<bool> g_open{false};
+static std::vector<const char* (*)()>& hint_list() { static auto* v = new std::vector<const char* (*)()>; return *v; }
+static Question g_question;
+static bool g_asked;
+static void (*g_quit)();
 
 void button(const char* path, const char* label, void (*fn)(), const char* help, const char* confirm) {
     button_list().push_back(Button{path, label, help, confirm, fn, settings::next_order()});
@@ -28,6 +32,25 @@ void layout(const char* path, std::initializer_list<const char*> children) {
 
 bool is_open() { return g_open; }
 void set_open(bool open) { g_open = open; }
+
+void hint(const char* (*text)()) { hint_list().push_back(text); }
+const std::vector<const char* (*)()>& hints() { return hint_list(); }
+
+void ask(const char* question, void (*yes)()) {
+    g_question = Question{question, yes};
+    g_asked = true;
+}
+bool take_question(Question& out) {
+    if (!g_asked) return false;
+    g_asked = false;
+    out = g_question;
+    return true;
+}
+
+void quit() {
+    if (g_quit) g_quit();
+}
+void set_quit(void (*fn)()) { g_quit = fn; }
 
 const std::vector<Button>& buttons() { return button_list(); }
 const std::vector<Note>& notes() { return note_list(); }

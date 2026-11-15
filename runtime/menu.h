@@ -1,5 +1,5 @@
 // The in-game menu's entries beyond settings (settings.h): buttons, notes, and the order of
-// pages.
+// pages; and what a game shows over the picture itself: a hint, or a question.
 // Like settings, they are registered from static initializers and frozen when the menu
 // starts; the desktop frontend draws them (overlay.cpp). No SDL and no GL here, so a game's
 // SOURCES can register entries in every target.
@@ -34,6 +34,20 @@ void layout(const char* path, std::initializer_list<const char*> children);
 bool is_open();
 void set_open(bool open);
 
+// ---- over the game ----
+// A line the frontend shows over the game while the menu is closed, whenever `text`
+// returns one (null for none): a button a game offers on one of its screens, say. Called on
+// the main thread each frame drawn. Register from a static initializer.
+void hint(const char* (*text)());
+// Asks the player a yes/no question in the menu's place: the game paused and its pad at rest,
+// as with the menu open (even with "Let the game keep the controller"). Yes (A, Enter or a
+// click) calls `yes` on the main thread; No, B or Esc just closes it. Main thread: a game's
+// pad filter (input_ports::add_filter), say. A question not yet shown is replaced.
+void ask(const char* question, void (*yes)());
+// Ends the run as the menu's Quit does: settings.txt and the input log are saved. Main
+// thread. Does nothing where no frontend has said how (the benchmark).
+void quit();
+
 // For the frontend.
 struct Button {
     const char *path, *label, *help, *confirm;
@@ -48,5 +62,14 @@ struct Note {
 const std::vector<Note>& notes();
 // `children` sorted by layout() for `path`, then alphabetically.
 void sort_children(const std::string& path, std::vector<std::string>& children);
+// The hints registered, in order; and a question asked since the last call, if any.
+const std::vector<const char* (*)()>& hints();
+struct Question {
+    const char* text;
+    void (*yes)();
+};
+bool take_question(Question& out);
+// How quit() ends the run.
+void set_quit(void (*fn)());
 
 }  // namespace menu

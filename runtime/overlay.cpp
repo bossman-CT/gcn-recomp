@@ -68,6 +68,8 @@ static int g_open_at = -1;
 static std::string g_open_menu, g_shot_dir;
 static int g_shot_index, g_shot_wait;
 static bool g_no_save;  // a test run (GCN_MENU_OPEN) leaves settings.txt alone
+static bool g_asking;              // open for a game's question (menu::ask) rather than the menu
+static menu::Question g_question;
 
 struct Draw { const char* path; void (*fn)(); uint32_t order; };
 static std::vector<Draw>& draws() { static auto* v = new std::vector<Draw>; return *v; }
@@ -77,11 +79,12 @@ SDL_Window* window() { return g_win; }
 bool quit_requested() { return g_quit; }
 void request_quit() { g_quit = true; }
 
-static bool captures_input() { return g_open && !s_keep_input; }
+// A question always holds the game's pad, whatever the menu's own setting.
+static bool captures_input() { return g_open && (!s_keep_input || g_asking); }
 
 // The guest and its sound paused exactly while the menu is open with pausing on.
 static void sync_pause() {
-    const bool want = g_open && s_pause && !s_keep_input;
+    const bool want = captures_input() && s_pause;
     if (want == g_paused) return;
     g_paused = want;
     guest_pause(want);
@@ -96,13 +99,14 @@ void open(const char* which) {
     g_focus = true;
     if (g_ready) ImGui::GetIO().ClearInputKeys();
     SDL_ShowCursor(SDL_ENABLE);
-    if (s_show_hint) s_show_hint.set(false);  // they've found it
+    if (s_show_hint && !g_asking) s_show_hint.set(false);  // they've found it
     sync_pause();
 }
 
 void close() {
     if (!g_open) return;
     g_open = false;
+    g_asking = false;
     menu::set_open(false);
     for (int i = 0; i < 4; i++) {
         g_mask[i] = 0xFFFF;  // whatever is held now (the button that closed it) stays with the menu
@@ -175,6 +179,7 @@ void init(SDL_Window* win) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui_ImplSDL2_InitForOpenGL(win, SDL_GL_GetCurrentContext());
     input_ports::set_filter(filter_pad);
+    menu::set_quit(request_quit);
 #ifdef GCN_GL_ES
     ImGui_ImplOpenGL3_Init("#version 300 es");
 #else
@@ -451,7 +456,49 @@ static void draw_section(const Section& sec, float scale) {
     }
 }
 
+// A game's question (menu::ask), in the menu's place: Yes has the focus, so A answers yes;
+// No, B, Esc, Start and Back close it.
+static void draw_question() {
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+    if (g_focus) ImGui::SetNextWindowFocus();
+    ImGui::Begin("##question", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted(g_question.text);
+    ImGui::Spacing();
+    if (ImGui::Button("Yes")) {
+        void (*yes)() = g_question.yes;
+        close();
+        if (yes) yes();
+    }
+    if (g_focus) ImGui::SetKeyboardFocusHere(-1);
+    ImGui::SameLine();
+    if (ImGui::Button("No") || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) close();
+    ImGui::TextDisabled("A: yes   B: no");
+    ImGui::End();
+    g_focus = false;
+}
+
+// A game's hint (menu::hint), at the bottom right while the menu is closed.
+static void draw_game_hint(const char* text) {
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    const float pad = ImGui::GetStyle().WindowPadding.x;
+    ImGui::SetNextWindowPos(ImVec2(ds.x - pad, ds.y - pad), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##game_hint", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted(text);
+    ImGui::End();
+}
+
 static void draw_menu(float scale) {
+    if (g_asking) {
+        draw_question();
+        return;
+    }
     const auto tree = build_tree();
     const auto order = menu_order(tree);
     if (std::find(order.begin(), order.end(), g_menu) == order.end()) g_menu = order.empty() ? "" : order[0];
@@ -607,7 +654,11 @@ static void shot_step(int w, int h) {
 
 // One ImGui frame into framebuffer 0, if anything is to be shown.
 static void render(int w, int h) {
-    if (!g_open && !hint_showing()) return;
+    const char* game_hint = nullptr;
+    if (!g_open)
+        for (auto text : menu::hints())
+            if ((game_hint = text())) break;
+    if (!g_open && !hint_showing() && !game_hint) return;
     // The backend makes its GL objects in its first NewFrame; the font atlas is rebuilt
     // after that, so there is one texture for it.
     ImGui_ImplOpenGL3_NewFrame();
@@ -619,7 +670,10 @@ static void render(int w, int h) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (g_open) draw_menu(scale);
-    else draw_hint();
+    else {
+        if (hint_showing()) draw_hint();
+        if (game_hint) draw_game_hint(game_hint);
+    }
     ImGui::Render();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -642,6 +696,12 @@ static void frame_common() {
         open(g_open_menu.empty() ? nullptr : g_open_menu.c_str());
     }
     pages_frame();
+    menu::Question q;
+    if (menu::take_question(q) && !g_open) {
+        g_question = q;
+        g_asking = true;
+        open();
+    }
     sync_pause();
     autosave();
 }

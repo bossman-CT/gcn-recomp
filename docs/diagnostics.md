@@ -127,6 +127,14 @@ switches check it without a person:
 A run with `GCN_MENU_OPEN` leaves the default `settings.txt` alone; with `--settings=<path>`
 it saves to that file as a player's run would, which tests the round trip.
 
+A game can put two things over the picture itself (`runtime/menu.h`): a hint, one line at
+the bottom right while the menu is closed, whenever a function it registers returns one
+(`menu::hint`); and a yes/no question (`menu::ask`), which opens the menu window in its
+place with the game paused and its pad at rest, as the menu does, even with "Let the game
+keep the controller" on. Yes (A, Enter, a click) runs the game's function; No, B, Esc,
+Start and Back close it. `menu::quit` ends the run as the menu's Quit does. A question
+shows in `GCN_MENU_SHOT`'s pictures like the menu.
+
 ## Scripted input
 
 `GCN_INPUT="frame:BUTTON:duration,..."` presses buttons at given submitted-frame counts; `+`
