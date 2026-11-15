@@ -2,6 +2,7 @@
 #include "../runtime.h"
 #include "../input_log.h"
 #include "pad.h"
+#include "../latency.h"
 #include <mutex>
 
 PadState g_pads[4];
@@ -89,6 +90,7 @@ static void si_transfer_complete() {
         case 0x40: {  // direct poll
             uint32_t hi, lo;
             make_poll_response(chan, hi, lo);
+            latency::pad_read();
             for (int i = 0; i < 4; i++) { resp[i] = hi >> (24 - 8 * i); resp[4 + i] = lo >> (24 - 8 * i); }
             break;
         }
@@ -133,7 +135,10 @@ uint32_t si_read32(uint32_t off) {
         uint32_t hi, lo;
         make_poll_response(chan, hi, lo);
         if (!pad_get(chan).connected) { hi = 0x80000000u; lo = 0; }
-        if (reg == 1) return hi;
+        if (reg == 1) {
+            latency::pad_read();
+            return hi;
+        }
         // reading the low word clears RDST
         g_sisr &= ~(SR_RDST << sisr_shift(chan));
         si_update_irq();

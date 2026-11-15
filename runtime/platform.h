@@ -56,6 +56,12 @@ bool plat_thread_sched(long tid, uint64_t* run_ns, uint64_t* wait_ns, int* cpu);
 // Seconds to add to UTC to get local wall-clock time, including any DST in effect.
 long plat_utc_offset_seconds();
 
+// ---- presentation ----
+// The desktop compositor's refresh: its last vertical blank and the period between them,
+// in std::chrono::steady_clock nanoseconds (time_since_epoch). False where the platform
+// doesn't say (only Windows' DWM does here).
+bool plat_compositor_timing(int64_t* last_vblank_ns, int64_t* period_ns);
+
 // ---- files ----
 bool plat_readable(const char* path);
 // Create `path` and any missing parents. Ignores already-exists.

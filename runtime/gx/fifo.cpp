@@ -5,6 +5,7 @@
 #include "../platform.h"
 #include "../settings.h"
 #include "gx.h"
+#include "../latency.h"
 #include "render.h"
 #include "render_gl.h"
 #include <atomic>
@@ -388,6 +389,7 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
             fe_wait_until(at, gx::Stall::FeFull);
         }
         gx::g_frames_submitted++;
+        latency::frame_end(gx::g_frames_submitted.load());
         gx::copy_writebacks_land(gx::g_frames_submitted.load());
         stall_report(gx::g_frames_submitted);
         if (g_tok_latest_at) {

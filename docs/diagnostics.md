@@ -386,6 +386,51 @@ the guest advances; `--warmup=N` (default 8) excludes boot from the steady-state
 last column is the guest's work per presented frame in loop back-edges, the figure the
 virtual clock's tick-per-edge constant is tuned against.
 
+## Input latency
+
+From a press on the controller to the frame that shows it there are three shares, and
+each is measured its own way.
+
+**The game's own.** This runs from the input being there to the game handing over the
+first frame that shows it. It is the game's code (where in its frame it reads the
+controller, and how many frames its logic and drawing take), so it is measured on the game,
+by replay:
+
+- Copy a v6 route, and in the copy force one channel's stick or a button from a virtual
+  time T for half a second (a pad line at T, the original state restored after).
+- Replay the copy and the original by virtual time (`GCN_REPLAY_BY_TIME=1`), each with
+  `GCN_DUMP_RANGE` dumping every frame around T and a log of each frame's virtual time.
+- The first frame that differs, less T, is the delay. Replays are exact, so it is exact.
+- Run it at a few offsets of T across one frame for the least, the most and the average.
+  A delay that falls in a straight line as T moves through the frame, then jumps back by
+  a frame, is a game that reads the controller once a frame and sees it current. The
+  scripted presses of `GCN_INPUT` don't serve: a replay replaces the pads' state.
+
+**The host's.** `GCN_LATENCYLOG=1` prints once a second (`runtime/latency.cpp`):
+
+- **pad age:** how old the host's controller state was when the guest read it. The host
+  refreshes it once a pass of its loop, and the loop waits at most 4 ms for a frame, so this
+  is about 2 ms on average while the swap doesn't block.
+- **loop:** how often the host refreshed the controllers.
+- **frame:** from the guest's frame end (its copy to the display) to the host's swap of
+  that frame returning.
+- **swap:** the swap call alone.
+- **vblank:** from the frame end to the compositor's first vertical blank after the swap
+  returned: the soonest the frame can be on screen. Windows' DWM only
+  (`plat_compositor_timing`).
+
+Only a paced run presents every frame, so run it at the normal pace: a `--fast-forward`
+replay of a route cut where the measurement should start, then live.
+
+**The display's.** What the compositor and the panel add after the swap isn't visible from
+the process. Even with the swap interval at 0, a composited window (and, by what was seen,
+a borderless fullscreen one) gets one frame a refresh. When frames come as fast as the
+display refreshes, the swap blocks for a refresh behind the frame before it: `swap` near a
+refresh, and `frame` near two. Asking the compositor to flush after each swap
+(`DwmFlush`), to keep that line empty, was tried. Where the compositor ran at another rate
+than the frames, it collapsed the frame rate, so it is not done. A present that never
+queues needs a swap chain the app controls (DXGI's flip model, with a waitable object).
+
 ## The clock
 
 Guest time is virtual by default. Every backward branch in recompiled code counts one

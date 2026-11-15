@@ -22,6 +22,8 @@
 #include <dbghelp.h>
 #include <io.h>
 #include <process.h>
+#include <dwmapi.h>
+#include <chrono>
 
 void* plat_reserve(size_t size, void*) {
     return VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
@@ -343,6 +345,46 @@ bool plat_read_at(PlatFile* f, uint64_t offset, void* dst, uint32_t len) {
     return true;
 }
 
+#endif
+
+// ===========================================================================
+// Presentation
+// ===========================================================================
+#ifdef _WIN32
+// dwmapi is loaded when first wanted, so a host without it still starts.
+namespace {
+struct Dwm {
+    HRESULT(WINAPI* timing)(HWND, DWM_TIMING_INFO*) = nullptr;
+    Dwm() {
+        if (HMODULE m = LoadLibraryW(L"dwmapi.dll")) {
+            timing = (HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*))(void*)GetProcAddress(m, "DwmGetCompositionTimingInfo");
+        }
+    }
+};
+const Dwm& dwm() {
+    static const Dwm d;
+    return d;
+}
+}  // namespace
+
+bool plat_compositor_timing(int64_t* last_vblank_ns, int64_t* period_ns) {
+    if (!dwm().timing) return false;
+    DWM_TIMING_INFO ti = {};
+    ti.cbSize = sizeof(ti);
+    if (FAILED(dwm().timing(nullptr, &ti)) || !ti.qpcRefreshPeriod) return false;
+    LARGE_INTEGER f, now;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&now);
+    const int64_t steady =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto ns = [&](int64_t qpc) { return (int64_t)((double)qpc * 1e9 / (double)f.QuadPart); };
+    *last_vblank_ns = steady - ns((int64_t)now.QuadPart - (int64_t)ti.qpcVBlank);
+    *period_ns = ns((int64_t)ti.qpcRefreshPeriod);
+    return true;
+}
+
+#else
+bool plat_compositor_timing(int64_t*, int64_t*) { return false; }
 #endif
 
 // ===========================================================================

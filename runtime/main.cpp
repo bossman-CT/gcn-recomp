@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "latency.h"
 
 uint32_t boot_load(const char* iso_path);
 void debug_dump_threads();
@@ -155,6 +156,7 @@ bool audio_open();
 static void merge_desktop_pad(PadState& p) { input_ports::merge(0, p); }
 
 static void update_pad() { input_ports::update(); }
+
 
 static SDL_Window* g_win;
 
@@ -426,6 +428,7 @@ int main(int argc, char** argv) {
     while (running) {
         running = pump_events();
         update_pad();
+        latency::pad_sampled();
         int dw, dh;
         SDL_GL_GetDrawableSize(win, &dw, &dh);
         gx::render_set_window_size(dw, dh);
@@ -489,7 +492,15 @@ int main(int argc, char** argv) {
             // replay to about that rate. Every frame is still rendered, since the guest may
             // wait on what rendering writes back (copies to RAM, EFB peeks).
             static uint32_t unpaced_frames = 0;
-            if (clock_scale() > 0 || ++unpaced_frames % 8 == 0) SDL_GL_SwapWindow(win);
+            if (clock_scale() > 0 || ++unpaced_frames % 8 == 0) {
+                const auto swap_start = std::chrono::steady_clock::now();
+                SDL_GL_SwapWindow(win);
+                const auto swapped = std::chrono::steady_clock::now();
+                const int64_t swapped_ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(swapped.time_since_epoch()).count();
+                latency::presented(gx::present_count(),
+                                   std::chrono::duration<double, std::milli>(swapped - swap_start).count(), swapped_ns);
+            }
             frames++;
             auto now = std::chrono::steady_clock::now();
             double secs = std::chrono::duration<double>(now - t0).count();
