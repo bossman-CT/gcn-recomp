@@ -236,14 +236,23 @@ const Face kOthers[] = {
     {SDL_CONTROLLER_BUTTON_DPAD_LEFT, PAD_LEFT}, {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, PAD_RIGHT},
 };
 
-// The default gamepad mapping, less what controls.txt takes over on this port. A stick or
+// The default gamepad mapping, less what controls.txt takes over on this port: the pad
+// controls it binds from the gamepad, and the gamepad controls it binds. A stick or
 // trigger is taken over only while it is pushed, so that it can share the pad with the
 // keyboard and a headset's controllers.
 void gamepad(const Port& P, int port, PadState& p) {
     SDL_GameController* c = P.ctl;
-    const uint32_t skip = input_map_gamepad_override(port, P.type);
+    uint32_t skip = input_map_gamepad_override(port, P.type);
+    const uint64_t used = input_map_gamepad_sources(port, P.type);
+    auto axis_used = [&](SDL_GameControllerAxis a) { return (used >> (32 + a) & 1) != 0; };
+    if (axis_used(SDL_CONTROLLER_AXIS_LEFTX)) skip |= INPUT_MAP_STICK_X;
+    if (axis_used(SDL_CONTROLLER_AXIS_LEFTY)) skip |= INPUT_MAP_STICK_Y;
+    if (axis_used(SDL_CONTROLLER_AXIS_RIGHTX)) skip |= INPUT_MAP_CSTICK_X;
+    if (axis_used(SDL_CONTROLLER_AXIS_RIGHTY)) skip |= INPUT_MAP_CSTICK_Y;
+    if (axis_used(SDL_CONTROLLER_AXIS_TRIGGERLEFT)) skip |= PAD_L;
+    if (axis_used(SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) skip |= PAD_R;
     auto press = [&](const Face& f) {
-        if (!(skip & f.bit) && SDL_GameControllerGetButton(c, f.src)) p.buttons |= f.bit;
+        if (!(skip & f.bit) && !(used >> f.src & 1) && SDL_GameControllerGetButton(c, f.src)) p.buttons |= f.bit;
     };
     for (const Face& f : P.cfg.modern ? kModern : kPositional) press(f);
     for (const Face& f : kOthers) press(f);

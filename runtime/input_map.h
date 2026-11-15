@@ -44,8 +44,9 @@
 //   gamepad <control>             a b x y, leftshoulder, dpup, lefttrigger, leftx, ...
 //   gamepad <axis>+ / <axis>-     one half of a stick axis
 // A pad control bound from the gamepad, or to `none`, loses its default gamepad source on
-// that port, so `A = gamepad b` and `B = gamepad a` swap the two, and `Z = none` frees the
-// button for something else. A stick axis bound from the gamepad has a dead zone of 0.12
+// that port, and a gamepad control the file binds loses its default use, so that a remap
+// never presses two things: `A = gamepad b` makes b the A button and nothing else, and
+// leaves whatever b did by default unbound. `Z = none` frees a pad control. A stick axis bound from the gamepad has a dead zone of 0.12
 // unless the line gives one.
 //
 // Sections. Lines before any section bind port 1, as they always have; settings there
@@ -104,6 +105,9 @@ void input_map_apply(int port, PadState& p, SDL_GameController* pad, int type);
 // The pad controls the file takes from the default gamepad mapping on this port: PAD_*
 // bits and INPUT_MAP_STICK_*.
 uint32_t input_map_gamepad_override(int port, int type);
+// The gamepad controls the file binds on this port, which lose their default use: bit
+// `button` for a SDL_GameControllerButton, bit 32 + `axis` for an axis.
+uint64_t input_map_gamepad_sources(int port, int type);
 // The file's value for a per-port setting (input_ports.h) on this port, or null.
 const char* input_map_setting(int port, int type, const char* key);
 // A gamepad control's name: its SDL_GameControllerButton in `button`, or its axis in

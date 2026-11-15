@@ -563,6 +563,14 @@ uint32_t input_map_gamepad_override(int port, int type) {
     return m;
 }
 
+uint64_t input_map_gamepad_sources(int port, int type) {
+    uint64_t m = 0;
+    for (const auto& b : g_bindings)
+        if (b.kind == Kind::Gamepad && applies(b.ports, b.types, port, type))
+            m |= b.pad_button >= 0 ? 1ull << b.pad_button : 1ull << (32 + b.pad_axis);
+    return m;
+}
+
 const char* input_map_setting(int port, int type, const char* key) {
     const SettingLine* best = nullptr;
     for (const auto& l : g_settings)
