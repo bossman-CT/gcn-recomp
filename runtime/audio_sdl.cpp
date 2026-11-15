@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <SDL.h>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 void audio_render(int16_t* out, int frames);
@@ -18,6 +19,9 @@ void audio_set_device(const char* name) { g_device = name ? name : ""; }
 
 static void audio_callback(void*, uint8_t* stream, int len) {
     audio_render((int16_t*)stream, len / 4);
+    // Unpaced (--fast, or --fast-forward until its replay ends), the game makes sound many
+    // times faster than it plays: keep draining the mix, but play silence.
+    if (clock_scale() <= 0) memset(stream, 0, (size_t)len);
 }
 
 bool audio_open() {
