@@ -9,7 +9,7 @@
 #include <vector>
 
 namespace {
-struct ScriptedPress { uint32_t at, dur; uint16_t buttons; int sx, sy; int port; };
+struct ScriptedPress { uint32_t at, dur; uint16_t buttons; int sx, sy, cx, cy; int port; };
 std::vector<ScriptedPress> g_script;
 bool g_log;
 }  // namespace
@@ -35,7 +35,7 @@ void input_script_init(const char* spec) {
         }
         size_t c1 = item.find(':'), c2 = item.rfind(':');
         if (c1 == std::string::npos || c2 == c1) continue;
-        ScriptedPress p{(uint32_t)atoi(item.c_str()), (uint32_t)atoi(item.c_str() + c2 + 1), 0, 0, 0, port};
+        ScriptedPress p{(uint32_t)atoi(item.c_str()), (uint32_t)atoi(item.c_str() + c2 + 1), 0, 0, 0, 0, 0, port};
         std::string btns = item.substr(c1 + 1, c2 - c1 - 1);
         size_t bp = 0;
         while (bp <= btns.size()) {
@@ -50,10 +50,13 @@ void input_script_init(const char* spec) {
             else if (b == "UP") p.buttons |= PAD_UP; else if (b == "DOWN") p.buttons |= PAD_DOWN;
             else if (b == "LEFT") p.buttons |= PAD_LEFT; else if (b == "RIGHT") p.buttons |= PAD_RIGHT;
             // SL SR SU SD push the stick all the way (100); SR19 and the like push it that far.
-            else if (b.size() >= 2 && b[0] == 'S' && strchr("LRUD", b[1])) {
+            // CL CR CU CD do the same with the C stick.
+            else if (b.size() >= 2 && (b[0] == 'S' || b[0] == 'C') && strchr("LRUD", b[1])) {
                 const int amount = b.size() > 2 ? atoi(b.c_str() + 2) : 100;
-                if (b[1] == 'L') p.sx = -amount; else if (b[1] == 'R') p.sx = amount;
-                else if (b[1] == 'U') p.sy = amount; else p.sy = -amount;
+                int& x = b[0] == 'S' ? p.sx : p.cx;
+                int& y = b[0] == 'S' ? p.sy : p.cy;
+                if (b[1] == 'L') x = -amount; else if (b[1] == 'R') x = amount;
+                else if (b[1] == 'U') y = amount; else y = -amount;
             }
         }
         g_script.push_back(p);
@@ -76,6 +79,8 @@ void input_script_apply(PadState& p, int port) {
             p.buttons |= s.buttons;
             if (s.sx) p.stick_x = (uint8_t)(128 + s.sx);
             if (s.sy) p.stick_y = (uint8_t)(128 + s.sy);
+            if (s.cx) p.cstick_x = (uint8_t)(128 + s.cx);
+            if (s.cy) p.cstick_y = (uint8_t)(128 + s.cy);
             if (s.buttons & PAD_L) p.trig_l = 255;
             if (s.buttons & PAD_R) p.trig_r = 255;
         }

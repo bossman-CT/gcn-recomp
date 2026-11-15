@@ -10,7 +10,8 @@
 // count at which to press, e.g. "900:START:10,1200:A:10". A press for another port than
 // the first has the port in front: "2/900:A:10" (ports 1 to 4); a port the script drives
 // reads as plugged in for the whole run.
-// Buttons: A B X Y Z L R START UP DOWN LEFT RIGHT; stick: SL SR SU SD.
+// Buttons: A B X Y Z L R START UP DOWN LEFT RIGHT; stick: SL SR SU SD, all the way, or
+// as far as a number after them says (SR19); C stick: CL CR CU CD, likewise.
 // GCN_INPUT_LOG=1 logs each press as it fires.
 //
 // `spec` null or empty falls back to the GCN_INPUT environment variable, which an
