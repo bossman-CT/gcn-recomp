@@ -56,12 +56,23 @@ void event(const SDL_Event& e);
 // then the port's controller through its layout, controls.txt's bindings for the port,
 // and the gyro. Runs the port's rumble from the game's motor. Leaves `p.connected` alone.
 void merge(int port, PadState& p);
-// All four ports, built and handed to the guest: merge, the filter (set_filter), scripted
-// input (input_script.h), pad_set_state. Once per pass of the frontend's loop.
+// All four ports, built and handed to the guest: merge, scripted input (input_script.h),
+// the game's filters (add_filter), the frontend's (set_filter), pad_set_state. Once per pass
+// of the frontend's loop.
 void update();
-// A frontend's hook between merge and scripted input, for each port: a menu holding the
+// A frontend's hook on each port's pad, the last before the guest: a menu holding the
 // game's input while it is open, say.
 void set_filter(void (*fn)(int port, PadState& p));
+// A game's hook on each port's pad, before the frontend's (set_filter): a control scheme
+// reshaping what the controller does for the game, which may depend on what the game is
+// doing (read from guest memory). Called for every port, connected or not. Several may be
+// added; they run in the order added. The input log records the pad they leave, so a
+// replay needs nothing more.
+void add_filter(void (*fn)(int port, PadState& p));
+// The game's filters on one port's pad, in order: for a frontend's update. Defined in
+// input_filters.cpp, which every target links, so that a game's SOURCES can add a filter
+// in the benchmark too.
+void run_filters(int port, PadState& p);
 
 // Whether the port reads as plugged in.
 bool connected(int port);
@@ -84,6 +95,12 @@ std::string setting_get(int port, const char* key);
 // Overrides the file for this run (a menu). False, with `err` saying why, if the value is
 // not one the setting takes.
 bool setting_set(int port, const char* key, const std::string& value, std::string* err = nullptr);
+// Drops setting_set's override, so that controls.txt (or the default) decides again.
+void setting_clear(int port, const char* key);
+//
+// The menu's Controls > Controller page sets the face-button layout, the gyro and its
+// sensitivity for every port (controls.layout, controls.gyro, controls.gyro_sensitivity in
+// settings.txt). Each says "From controls.txt" until changed, and then wins over the file.
 
 // For input_map.cpp's parser: whether `key` is a per-port setting, and whether `value`
 // suits it.

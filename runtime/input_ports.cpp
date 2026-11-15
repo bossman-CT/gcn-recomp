@@ -3,6 +3,7 @@
 #include "input_map.h"
 #include "input_script.h"
 #include "runtime.h"
+#include "settings.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -338,6 +339,44 @@ void gyro(Port& P, PadState& p) {
     add_to_stick(on_main ? 1 : 3, P.gy * c.sensitivity / 100.0f, on_main ? p.stick_y : p.cstick_y);
 }
 
+// ---- the menu: Controls > Controller ----
+// Every port; "From controls.txt" (the default) leaves each port's own setting alone.
+auto& s_layout = settings::choice("controls.layout", "Controls/Controller", "Face buttons",
+                                  {"From controls.txt", "Positional", "Modern"}, 0)
+                     .help("Positional: the face buttons as they sit on the controller (bottom A, left B, right X, "
+                           "top Y). Modern: bottom confirms, right goes back. From controls.txt: each port's "
+                           "layout line, positional without one.");
+auto& s_gyro = settings::choice("controls.gyro", "Controls/Controller", "Gyro",
+                                {"From controls.txt", "Off", "Control stick", "C-stick"}, 0)
+                   .help("The controller's gyro (DualShock 4, DualSense, Switch Pro and the like) onto a stick: "
+                         "turning the controller pushes the stick as fast as it turns. From controls.txt: each "
+                         "port's gyro line, off without one.");
+auto& s_gyro_sens = settings::slider("controls.gyro_sensitivity", "Controls/Controller", "Gyro sensitivity",
+                                     1.0f, 0.1f, 5.0f)
+                        .format("%.2fx")
+                        .help("Full deflection at 100 degrees a second, times this. Wins over controls.txt once "
+                              "changed, or whenever Gyro is set here.");
+
+// Applies the menu's entries to every port when one of them changes (and on the first
+// update, after settings.txt is loaded).
+void apply_menu() {
+    static double last[3] = {-1, -1, -1};
+    const double now[3] = {s_layout.value(), s_gyro.value(), s_gyro_sens.value()};
+    if (now[0] == last[0] && now[1] == last[1] && now[2] == last[2]) return;
+    static const char* const kLayouts[] = {nullptr, "positional", "modern"};
+    static const char* const kGyros[] = {nullptr, "off", "stick", "cstick"};
+    const int layout = (int)now[0], gyro = (int)now[1];
+    const bool sens = gyro != 0 || !s_gyro_sens.is_default();
+    char buf[32];
+    snprintf(buf, sizeof buf, "%g", (float)now[2]);
+    for (int p = 0; p < 4; p++) {
+        if (layout > 0 && layout < 3) setting_set(p, "layout", kLayouts[layout]); else setting_clear(p, "layout");
+        if (gyro > 0 && gyro < 4) setting_set(p, "gyro", kGyros[gyro]); else setting_clear(p, "gyro");
+        if (sens) setting_set(p, "gyro_sensitivity", buf); else setting_clear(p, "gyro_sensitivity");
+    }
+    std::copy(now, now + 3, last);
+}
+
 }  // namespace
 
 void init() {
@@ -379,14 +418,17 @@ void merge(int port, PadState& p) {
 }
 
 void update() {
+    apply_menu();
     const unsigned scripted = input_script_ports();
     for (int port = 0; port < 4; port++) {
         PadState p;
         // A port the script drives is plugged in, as a controller would be.
         p.connected = connected(port) || (scripted >> port & 1);
         if (p.connected) merge(port, p);
-        if (g_filter) g_filter(port, p);
+        // Scripted presses stand in for a controller, so the game's filters see them too.
         input_script_apply(p, port);
+        run_filters(port, p);
+        if (g_filter) g_filter(port, p);
         pad_set_state(port, p);
     }
 }
@@ -435,6 +477,14 @@ bool setting_set(int port, const char* key, const std::string& value, std::strin
     g_ports[port].overridden[k] = true;
     resolve(port);
     return true;
+}
+
+void setting_clear(int port, const char* key) {
+    const int k = find_key(key);
+    if (k < 0 || port < 0 || port > 3 || !g_ports[port].overridden[k]) return;
+    g_ports[port].overridden[k] = false;
+    g_ports[port].override_value[k].clear();
+    resolve(port);
 }
 
 bool is_setting(const std::string& key) { return find_key(key.c_str()) >= 0; }
