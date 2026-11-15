@@ -135,6 +135,7 @@ static float g_wide_full = 0.95f;     // render_set_wide_full
 static bool g_frame_wide = false;     // the batch being drawn is shown wide
 static bool g_present_wide = false;   // the frame last presented was
 static std::vector<float> g_wide_plan;  // per command: a draw's b, or NAN for as the game drew it
+static std::vector<int> g_wide_on;      // per command: the draw (draw log number) of the panel it lies on, or -1
 static float g_cur_wide_s = 1.0f, g_cur_wide_b = 0.0f;   // the draw being applied
 
 // VR eye state. When active, perspective batches are re-projected for the eye and the
@@ -3687,7 +3688,8 @@ static void mark_offscreen_passes(const Batch& b, std::vector<uint8_t>& skip) {
 //    copy of the frame put back, and is left to fill the wider picture;
 //  - any other 2D draw, or a 3D one through a smaller viewport (a model in a window of the
 //    HUD), keeps its proportions: centred, or kept at its distance from the side its box
-//    lies on (render_set_wide_anchor);
+//    lies on (render_set_wide_anchor). One lying on a centred 2D shape drawn before it (a
+//    panel) stays centred with it;
 //  - the off-screen passes are left alone: what they draw is a texture, not the frame.
 static void wide_plan(const Batch& b) {
     g_wide_plan.clear();
@@ -3769,8 +3771,15 @@ static void wide_plan(const Batch& b) {
     // half-width, to the centre.
     auto b_for = [&](float t) { return s - 1.0f + 2.0f * ((1.0f - s) * cx + t * hw) / EFB_W; };
     g_wide_plan.assign(b.cmds.size(), NAN);
+    g_wide_on.assign(b.cmds.size(), -1);
+    // The boxes of the 2D shapes kept centred so far (not across the frame): the panels a
+    // later draw may lie on, with their numbers in the draw log.
+    struct Box { float x0, x1, y0, y1; int draw; };
+    std::vector<Box> panels;
+    int draw = -1;
     for (size_t i = 0; i < b.cmds.size(); i++) {
         const Cmd& c = b.cmds[i];
+        if (c.type == CmdType::Draw) draw++;
         if (c.type != CmdType::Draw || skip[i]) continue;
         const PixelState& st = b.states[c.state];
         const bool perspective = (int)st.proj[6] == 0;
@@ -3780,20 +3789,33 @@ static void wide_plan(const Batch& b) {
             g_wide_plan[i] = b_for(0.0f);
             continue;
         }
-        // The box it covers across the frame.
+        // The box it covers in the frame.
+        int xoff, yoff;
+        scissor_offset(st.bp, xoff, yoff);
+        const float vy0 = st.viewport[4] - yoff - fabsf(st.viewport[1]), vy1 = st.viewport[4] - yoff + fabsf(st.viewport[1]);
         float x0 = std::max(vx0, sx0), x1 = std::min(vx1, sx1);
+        float y0 = std::max(vy0, (float)((int)(st.bp[0x20] & 0x7FF) - yoff));
+        float y1 = std::min(vy1, (float)((int)(st.bp[0x21] & 0x7FF) - yoff + 1));
+        // Whether it can be a panel: a 2D shape (triangles, not lines or points) lying wholly
+        // in its viewport. Lines or sprites strewn across the frame, or reaching past it, are
+        // not something drawn on.
+        bool panel = false;
         if (!perspective) {
-            int xoff, yoff;
-            scissor_offset(st.bp, xoff, yoff);
-            float lo = 1e30f, hi = -1e30f;
+            float lo = 1e30f, hi = -1e30f, ylo = 1e30f, yhi = -1e30f;
             for (uint32_t v = 0; v < c.count; v++) {
                 const float* q = b.verts[b.indices[c.first + v]].pos;
                 const float px = st.viewport[3] - xoff + st.viewport[0] * (st.proj[0] * q[0] + st.proj[1]);
+                const float py = st.viewport[4] - yoff + st.viewport[1] * (st.proj[2] * q[1] + st.proj[3]);
                 lo = std::min(lo, px);
                 hi = std::max(hi, px);
+                ylo = std::min(ylo, py);
+                yhi = std::max(yhi, py);
             }
+            panel = c.prim == 0 && lo >= vx0 - 1.0f && hi <= vx1 + 1.0f && ylo >= vy0 - 1.0f && yhi <= vy1 + 1.0f;
             x0 = std::max(x0, lo);
             x1 = std::min(x1, hi);
+            y0 = std::max(y0, ylo);
+            y1 = std::min(y1, yhi);
         }
         if (x1 <= x0) {
             g_wide_plan[i] = b_for(0.0f);
@@ -3804,6 +3826,17 @@ static void wide_plan(const Batch& b) {
         float t = 0.0f;
         if (f1 <= -g_wide_split) t = -(1.0f - s);
         else if (f0 >= g_wide_split) t = 1.0f - s;
+        // A draw lying wholly on a panel kept centred, drawn before it, stays with the panel:
+        // the text, cursor and icons of a menu box that crosses the split lie beyond the split
+        // themselves, and the rule by position alone would move them out of their box.
+        if (t != 0.0f)
+            for (const Box& p : panels)
+                if (x0 >= p.x0 - 1.0f && x1 <= p.x1 + 1.0f && y0 >= p.y0 - 1.0f && y1 <= p.y1 + 1.0f) {
+                    t = 0.0f;
+                    g_wide_on[i] = p.draw;
+                    break;
+                }
+        if (panel && t == 0.0f && y1 > y0) panels.push_back({x0, x1, y0, y1, draw});
         g_wide_plan[i] = b_for(t);
     }
 }
@@ -4601,6 +4634,18 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         zlo, zhi, xlo, xhi, ylo, yhi, band_lo, band_hi, st.clip_disable ? " noclip" : "",
                         at_origin, slivers, sliver_text.c_str());
                 if (st.tag) fprintf(stderr, " tag=%u", st.tag);   // set_draw_tag
+                // Widescreen (wide_plan): the draw's viewport and scissor across, in EFB
+                // pixels, and the b it is mapped by (`as-drawn` for one left as the game drew it).
+                if (!g_wide_plan.empty()) {
+                    int xoff, yoff;
+                    scissor_offset(st.bp, xoff, yoff);
+                    const float half = fabsf(st.viewport[0]);
+                    fprintf(stderr, " vp=%.0f..%.0f sc=%d..%d", st.viewport[3] - xoff - half, st.viewport[3] - xoff + half,
+                            (int)(st.bp[0x20] >> 12 & 0x7FF) - xoff, (int)(st.bp[0x21] >> 12 & 0x7FF) - xoff + 1);
+                    if (std::isnan(g_wide_plan[ci])) fprintf(stderr, " wide=as-drawn");
+                    else fprintf(stderr, " wide=%.4f", g_wide_plan[ci]);
+                    if (g_wide_on[ci] >= 0) fprintf(stderr, " on=%d", g_wide_on[ci]);
+                }
                 if (slivers) fprintf(stderr, "\n       ");
                 // Each texture by id and, for a decoded one, by its content hash, which is
                 // the same in every run (TexData::hash); an EFB copy is starred.

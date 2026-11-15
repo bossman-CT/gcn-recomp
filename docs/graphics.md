@@ -1092,7 +1092,12 @@ presented. So:
   frame's nearer side instead of the centre (`render_set_wide_anchor`): a box lying wholly
   beyond `split` on one side moves out with that side. 1, the default, keeps everything
   centred. The rule is by position only, so a game turns it on with a split that suits its HUD;
-  a marker following something into that part of the frame moves out with the HUD;
+  a marker following something into that part of the frame moves out with the HUD. A draw
+  lying wholly on a panel drawn before it in the frame stays centred with it, so the text,
+  cursor and icons of a menu box that crosses the split stay in their box, though they lie
+  beyond the split themselves. A panel is a centred 2D draw of triangles lying wholly in its
+  viewport, and not across the frame: lines, or sprites reaching past the frame's edges, are
+  not drawn on;
 - a scissor rect moves with its draw, unless it spans the EFB's width;
 - the off-screen passes (`mark_offscreen_passes`) are left alone, since what they draw is a
   texture;

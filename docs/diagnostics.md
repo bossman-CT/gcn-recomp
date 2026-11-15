@@ -576,7 +576,10 @@ use, which every lookup prolonged.
   run; an EFB copy is starred); in stereo it also prints, per draw the eye makes, which
   layer the eye gave it (`[eyedraw]`: world, sky, the foreground or HUD bands, the HUD
   frame). `GCN_DRAW_SKIP=a-b` then drops a range of them, in the eyes too, to attribute a
-  piece of the image to the draws that made it.
+  piece of the image to the draws that made it. In a frame shown widescreen it also gives
+  each draw's viewport and scissor across, in EFB pixels (`vp=`, `sc=`), and the `b` its x
+  is mapped by (`wide=`; 0 is centred, `as-drawn` is left as the game drew it; see
+  graphics.md, "Widescreen"): which of a HUD's pieces are anchored to a side.
 - `GCN_PIXEL=x,y[;x,y...]` (EFB pixels) with `GCN_DRAWLOG` reads each listed pixel back
   after every draw of that frame and prints it, colour and 24-bit depth, whenever it
   changed, with the draw's index: which draws touch a pixel and what each leaves there,
