@@ -1942,6 +1942,7 @@ void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
             copy_writebacks_land(g_frames_submitted.load());
             debug_guest_check("frame");
             heap_trace_frame(g_frames_submitted.load());
+            state_hash_frame(g_frames_submitted.load());
         }
         if (display_copy_ends_frame(cc)) {
             g_have_last_state = false;

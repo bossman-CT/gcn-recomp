@@ -46,6 +46,9 @@ bool input_pad_poll(int chan, PadState& s);
 // Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();
 
+// The pad polls so far, all channels: the key a replay by poll goes by. Guest thread.
+uint32_t input_poll_seq();
+
 // A poll is any read the guest makes of the SI's pad registers, so the count of them
 // depends on how often the game reads: a game made to run at another frame rate reads
 // more or less often a second, and a replay keyed by poll hands it the inputs per game

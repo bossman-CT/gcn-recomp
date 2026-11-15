@@ -360,6 +360,8 @@ bool input_replay_active() {
     return replay_running();
 }
 
+uint32_t input_poll_seq() { return g_poll_seq; }
+
 bool input_pose(const char* kind, bool* valid, float* v, int n) {
     std::lock_guard<std::mutex> lk(g_mutex);
     PoseChannel& ch = pose_channel(kind);

@@ -145,6 +145,42 @@ a controller were in it, so a script can stand in for a second player. The log r
 port's state on its own lines (the `chan` column), and a replay gives each port back what
 it had, so a recording with several players replays as exactly as one with one.
 
+## The guest-state hash
+
+`GCN_STATE_HASH=<every>[:<file>]` writes a digest of the guest's state at the end of every
+`<every>`th submitted frame, to the file or, without one, to stderr. Two runs fed the same
+inputs -- two replays of one log, say, at different render settings or on different PCs --
+are in the same state at a frame exactly when their lines for it match, which is the
+question lockstep play over a network depends on, and a sharper check of a replay than its
+frames. `python tools/state_hash_diff.py a.txt b.txt` compares two logs by frame and says
+where they part: the first frame that differs, which of the parts below differ there, and
+which 1 MB blocks.
+
+Each line is `frame poll tick all ram aram lc | <24 RAM blocks> | <16 ARAM blocks>`: the
+submitted frame, the pad polls so far, the virtual time in time-base ticks, a hash of all of
+it, hashes of main RAM (24 MB), ARAM (16 MB) and the locked cache window (`LC_SIZE`), and
+the top 32 bits of each megabyte's hash. That is everything the guest can read back from
+memory. What it leaves out is what lives in host threads (the guest threads' registers,
+which the recompiled code keeps on the host stack) and the hardware's registers; a run that
+parts there shows it in memory or in the virtual time within a frame or two.
+
+It is taken on the guest thread at the frame boundary (`gx/fifo.cpp`, `SkimSync::Frame`),
+where the guest is between frames and no other thread writes guest memory, and it only
+reads, so the guest sees nothing of it. It costs 2-3 ms of the guest thread's time per hash
+on a desktop (40 MB), which is nothing to a replay. In a paced run that time counts like any
+other host stall: on a host already near its limit it can tip the clock into a catch-up
+jump, which the input log records like any other, so a replay of that run is still exact.
+
+To find where two runs part: the diff names the frame and the blocks; `GCN_RAM_DUMP_AT` (below)
+at that frame in each run gives the bytes to compare; and with
+an address that differs, `GCN_WATCH_ADDR` on a replay finds what wrote it. Memory that
+legitimately differs between runs fed the same inputs -- a game that keeps something of
+the host there -- is left out of every hash by `GCN_STATE_HASH_SKIP=<from>-<to>,...` or
+`<from>+<len>` (hex guest addresses, `a:<offset>` for ARAM), or by `state_hash_exclude()`
+from the game's sources; the skipped bytes hash as zeroes, so the blocks keep their place,
+and the log's header lists them. `state_hash_compute()` is the same digest for code that
+wants it, such as a desync check.
+
 ## Frame dumps
 
 `--hidden --dump-dir=DIR --dump-every=N` runs with the window hidden and writes every Nth

@@ -398,6 +398,7 @@ static void skim_sync(gx::SkimSync kind, uint32_t value, std::vector<uint8_t>&) 
         debug_guest_check("frame");
         heap_trace_frame(gx::g_frames_submitted.load());
         ram_dump_frame(gx::g_frames_submitted.load());
+        state_hash_frame(gx::g_frames_submitted.load());
         // The settings the guest reads change here, before the game's own hook, so the
         // hook and the frame that follows see one value; then the pause gate, after this
         // frame's work is done.

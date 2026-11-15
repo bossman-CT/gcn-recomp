@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <string>
+#include <vector>
 #include <functional>
 
 // ---- logging ----
@@ -167,6 +168,23 @@ std::string guest_str(uint32_t addr, size_t max = 4096);
 // memory (runtime/heap_trace.cpp); with GCN_HEAP set, also the live cells by caller.
 void heap_report(std::string& out);
 void heap_trace_frame(uint32_t frame);  // GCN_HEAP=<frames>: the report every so many frames
+
+// ---- the guest-state hash (state_hash.cpp) ----
+// A digest of everything the guest can read back: main RAM, ARAM and the locked cache,
+// with the virtual time. Two runs fed the same inputs that compute the same hash at the
+// same frame have the same state there, which is what lockstep play and a replay check
+// rely on. GCN_STATE_HASH=<every>[:<file>] writes one at the end of every <every>th
+// submitted frame (stderr without a file), with per-megabyte block hashes to say where two
+// runs parted; see docs/diagnostics.md. It only reads guest memory, on the guest thread at
+// the frame boundary, so the guest sees nothing of it.
+struct StateHash { uint64_t all, ram, aram, lc; };
+// The guest thread, between frames. The block hashes, when asked for, are per 1 MB.
+StateHash state_hash_compute(std::vector<uint64_t>* ram_blocks = nullptr, std::vector<uint64_t>* aram_blocks = nullptr);
+// Leaves a range out of every hash from now on, hashed as zeroes: memory a game keeps that
+// legitimately differs between runs fed the same inputs. A guest address (RAM or the locked
+// cache) or, with `aram`, an ARAM offset. GCN_STATE_HASH_SKIP adds ranges from outside.
+void state_hash_exclude(uint32_t addr, uint32_t len, bool aram = false);
+void state_hash_frame(uint32_t frame);  // the frame boundary's call (gx/fifo.cpp, gx/xf.cpp)
 
 // Names a guest address. func_name wants a function's first instruction; func_containing
 // takes any address inside one, which is what a return address off the stack is.
