@@ -1047,6 +1047,31 @@ scales by the copy.
 `GCN_TEXCOORD_SCALE=texture` brings back the old scaling, by each stage's bound texture, for
 comparing a scene both ways.
 
+## Internal resolution
+
+The EFB is drawn at a multiple of its 640x528, the internal scale (`--scale=N`,
+`render_set_internal_scale`, the `graphics.internal_scale` setting). The scale may be a
+fraction such as `2.25`. It's kept to a step of 1/16, at which the EFB's width and height are
+whole numbers of pixels, between 1 and `kMaxInternalScale`. Every scaled edge (scissor rects,
+copy rects, XFB strips, the EFB itself) goes through one rounding (`sc` in `render_gl.cpp`),
+and a rect's size is the difference of its scaled edges. So rects that meet in the EFB still
+meet when scaled, and at a whole-number scale everything is exactly as before. A copy written
+back to RAM reads each hardware pixel from the middle of its block of samples.
+
+Match output (`--scale=window`, `render_set_match_output`, the `graphics.match_window`
+setting) picks the scale before each flat frame. It's the smallest step at which the picture
+covers the rect it's shown in, pixel for pixel. That rect is the window letterboxed to 4:3, or
+to the widescreen aspect when `--aspect` is set. The picture's size is the guest rect last
+presented. So a 640x480 picture in a 2560x1440 window is drawn at 3x (1920x1440), and in a
+3840x2160 one at 4.5x. Widescreen shows the EFB's 640 columns wider than 4:3, so the width
+decides there: 16:9 at 2560x1440 is drawn at 4x, with a third more rows than the window has. A
+new window size takes effect once it has held for 8 frames, so a drag doesn't rebuild the EFB
+at every step. Turning match on takes the size at once. The VR paths never use it.
+`--window=WxH` opens the window at that size, for trying a size without the screen.
+
+The approach follows xSNAIRZx's fractional scale and "Match window" in their fork of this
+runtime (MIT). Theirs rounds the matched scale to half steps; this one to 1/16.
+
 ## Widescreen
 
 `--aspect=16:9` (or `GCN_ASPECT`, or `render_set_aspect`) shows frames wider than 4:3 without

@@ -206,7 +206,11 @@ int main(int argc, char** argv) {
     bool test_ffb = false;
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
-    int scale = 0;  // 0: the setting, graphics.internal_scale
+    // --scale=N, a fraction too (2.25), or --scale=window: the internal resolution, as the
+    // settings graphics.internal_scale and graphics.match_window. Not given: the settings.
+    const char* scale_arg = nullptr;
+    // --window=WxH: the window's size at startup, instead of 960 lines at the aspect.
+    int window_w = 0, window_h = 0;
     // --aspect=16:9 (or 1.78): widescreen, gx::render_set_aspect. GCN_ASPECT likewise.
     const char* aspect = getenv("GCN_ASPECT");
     for (int i = 1; i < argc; i++) {
@@ -237,7 +241,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fast")) fast = true;
         else if (!strcmp(argv[i], "--fast-forward")) fast_forward = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
-        else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--scale=", 8)) scale_arg = argv[i] + 8;
+        else if (!strncmp(argv[i], "--window=", 9)) sscanf(argv[i] + 9, "%dx%d", &window_w, &window_h);
         else if (!strncmp(argv[i], "--aspect=", 9)) aspect = argv[i] + 9;
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
         else if (!strncmp(argv[i], "--dump-every=", 13)) gx::g_dump_every = atoi(argv[i] + 13);
@@ -254,8 +259,19 @@ int main(int argc, char** argv) {
         }
         gx::render_set_aspect(a);
     }
+    float scale = 0.0f;
+    bool match_window = false;
+    if (scale_arg) {
+        char* end = nullptr;
+        if (!strcmp(scale_arg, "window")) match_window = true;
+        else if (!((scale = strtof(scale_arg, &end)) >= 1.0f) || end == scale_arg || *end) {
+            fprintf(stderr, "--scale: expected a multiple of the console's resolution from 1 to %d (2, 2.25), or "
+                            "window, not %s\n", gx::kMaxInternalScale, scale_arg);
+            return 1;
+        }
+    }
     // settings.txt, under the command line's own flags (overlay.h).
-    overlay::startup(argv, scale, fullscreen, aspect && *aspect);
+    overlay::startup(argv, scale, match_window, fullscreen, aspect && *aspect);
     plat_install_crash_handlers(on_interrupt, on_fault);
     if (record_to && !record::start(record_to, record_w, record_h, 60)) return 1;
     if (telemetry_to && !telemetry::configure(telemetry_to)) {
@@ -336,8 +352,12 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG |
                                                   (gl_debug ? SDL_GL_CONTEXT_DEBUG_FLAG : 0));
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    if (window_w <= 0 || window_h <= 0) {
+        window_w = (int)lroundf(960 * gx::render_aspect());
+        window_h = 960;
+    }
     SDL_Window* win = SDL_CreateWindow(GCN_APP_LABEL, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       (int)lroundf(960 * gx::render_aspect()), 960, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+                                       window_w, window_h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
                                        (hidden ? SDL_WINDOW_HIDDEN : 0) |
                                        (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) fatal("SDL_CreateWindow: %s", SDL_GetError());

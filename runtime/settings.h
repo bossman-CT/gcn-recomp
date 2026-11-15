@@ -58,6 +58,7 @@ public:
     const char* label() const { return label_; }
     const char* help_text() const { return help_; }
     const char* format_text() const { return format_; }
+    double step_size() const { return step_; }
     uint32_t flag_bits() const { return flags_; }
     double lo() const { return lo_; }
     double hi() const { return hi_; }
@@ -103,6 +104,7 @@ protected:
     const char* format_ = nullptr;
     const char* why_ = nullptr;
     uint32_t flags_ = 0;
+    double step_ = 0.0;
     double def_, lo_, hi_;
     std::vector<const char*> names_;
     uint32_t order_;
@@ -127,6 +129,9 @@ public:
     Typed& help(const char* text) { help_ = text; return *this; }                 // shown by the menu
     Typed& flags(uint32_t f) { flags_ |= f; return *this; }
     Typed& format(const char* printf_format) { format_ = printf_format; return *this; }  // a slider's label
+    // A float slider the menu moves in steps of `size` from its low end, a step per key or
+    // d-pad press. settings.txt and --set may still hold any value in range.
+    Typed& step(double size) { step_ = size; return *this; }
     Typed& on_change(void (*fn)(T value)) { on_change_ = fn; return *this; }   // main thread, after a change
     Typed& enabled_if(bool (*fn)(), const char* why) { enabled_if_ = fn; why_ = why; return *this; }  // else greyed out
     Typed& visible_if(bool (*fn)()) { visible_if_ = fn; return *this; }

@@ -95,8 +95,33 @@ struct Program {
     mutable UniformShadow shadow;
 };
 
-// Samples kept per hardware pixel, in each axis. See render_set_internal_scale.
-static int g_scale = 2;
+// Samples kept per hardware pixel, in each axis: a multiple of 1/16 (quantize_scale). See
+// render_set_internal_scale.
+static float g_scale = 2.0f;
+
+// An EFB coordinate -- a pixel edge, or a size measured from 0 -- in the EFB's own pixels at
+// scale `s`. Every edge goes through this one rounding, so rects that meet in the EFB still
+// meet once scaled; a rect's size is the difference of its scaled edges, never its size
+// scaled. At a whole-number scale it is exactly v * s. Exact in float: v is far below 2^20
+// and s a multiple of 1/16.
+static inline int scaled(int v, float s) { return (int)lroundf((float)v * s); }
+static inline int sc(int v) { return scaled(v, g_scale); }
+// The EFB rect x0..x1, y0..y1 (guest pixels, y down) as GL rows and columns of the EFB
+// target (y up), edge by edge.
+struct EfbRect { int x, y, w, h; };
+static EfbRect efb_rect(int x0, int y0, int x1, int y1) {
+    const int gx0 = sc(x0), gx1 = sc(x1), gy0 = sc(EFB_H - y1), gy1 = sc(EFB_H - y0);
+    return {gx0, gy0, gx1 - gx0, gy1 - gy0};
+}
+static void scissor_efb(int x0, int y0, int x1, int y1) {
+    const EfbRect r = efb_rect(x0, y0, x1, y1);
+    glScissor(r.x, r.y, r.w, r.h);
+}
+static float quantize_scale(float s) {
+    if (!(s >= 1.0f)) return 1.0f;  // NaN too
+    if (s > (float)kMaxInternalScale) return (float)kMaxInternalScale;
+    return roundf(s * 16.0f) / 16.0f;
+}
 
 // Widescreen (render_set_aspect). A frame is still drawn into the 640-wide EFB, and shown
 // 1/g_wide_s times as wide as 4:3: a draw is mapped x' = s*x + b in the EFB's normalized x
@@ -1027,10 +1052,8 @@ out vec4 o;
 void main() { o = vec4(texture(u_src, vec2(v_uv.x, 1.0 - v_uv.y)).rgb, 1.0); }
 )";
 
-void render_init(int internal_scale) {
-    g_scale = internal_scale < 1 ? 1
-                                 : (internal_scale > kMaxInternalScale ? kMaxInternalScale
-                                                                       : internal_scale);
+void render_init(float internal_scale) {
+    g_scale = quantize_scale(internal_scale);
     const std::string vs_src = gen_vertex_shader();
 #ifdef GCN_GL_ES
     {
@@ -1095,14 +1118,14 @@ void render_init(int internal_scale) {
     glGenFramebuffers(1, &g_efb_fbo);
     glGenTextures(1, &g_efb_color);
     glBindTexture(GL_TEXTURE_2D, g_efb_color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc(EFB_W), sc(EFB_H), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &g_efb_depth);
     glBindTexture(GL_TEXTURE_2D, g_efb_depth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, EFB_W * g_scale, EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, sc(EFB_W), sc(EFB_H), 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
@@ -1212,11 +1235,12 @@ void render_set_window_size(int w, int h) { g_win_w = w; g_win_h = h; }
 static void gl_state_invalidate();
 static void uniforms_invalidate();
 static void xfbs_drop();
-void render_set_internal_scale(int scale) {
-    if (scale < 1) scale = 1;
-    if (scale > kMaxInternalScale) scale = kMaxInternalScale;
+float render_internal_scale() { return g_scale; }
+
+void render_set_internal_scale(float scale) {
+    scale = quantize_scale(scale);
     if (scale == g_scale) return;
-    const int old_scale = g_scale;
+    const float old_scale = g_scale;
     g_scale = scale;
     gl_state_invalidate();
     uniforms_invalidate();
@@ -1231,14 +1255,14 @@ void render_set_internal_scale(int scale) {
     glActiveTexture(GL_TEXTURE0);
     glGenTextures(1, &color);
     glBindTexture(GL_TEXTURE_2D, color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc(EFB_W), sc(EFB_H), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &depth);
     glBindTexture(GL_TEXTURE_2D, depth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, EFB_W * g_scale, EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, sc(EFB_W), sc(EFB_H), 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     GLuint fbo = 0;
@@ -1252,7 +1276,7 @@ void render_set_internal_scale(int scale) {
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
-    const GLint ow = EFB_W * old_scale, oh = EFB_H * old_scale, nw = EFB_W * g_scale, nh = EFB_H * g_scale;
+    const GLint ow = scaled(EFB_W, old_scale), oh = scaled(EFB_H, old_scale), nw = sc(EFB_W), nh = sc(EFB_H);
     glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
@@ -1271,14 +1295,14 @@ void render_set_internal_scale(int scale) {
         GLuint nt = 0;
         glGenTextures(1, &nt);
         glBindTexture(GL_TEXTURE_2D, nt);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t.w * g_scale, t.h * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc((int)t.w), sc((int)t.h), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, rfbo);
         glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dfbo);
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, nt, 0);
         // Nearest for a depth copy, whose texels are packed bytes that must not be averaged.
-        glBlitFramebuffer(0, 0, t.w * old_scale, t.h * old_scale, 0, 0, t.w * g_scale, t.h * g_scale,
+        glBlitFramebuffer(0, 0, scaled((int)t.w, old_scale), scaled((int)t.h, old_scale), 0, 0, sc((int)t.w), sc((int)t.h),
                           GL_COLOR_BUFFER_BIT, t.depth ? GL_NEAREST : GL_LINEAR);
         glDeleteTextures(1, &t.tex);
         t.tex = nt;
@@ -1288,7 +1312,7 @@ void render_set_internal_scale(int scale) {
     xfbs_drop();
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        fatal("EFB framebuffer incomplete at internal scale %d", g_scale);
+        fatal("EFB framebuffer incomplete at internal scale %g", g_scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,8 +1722,8 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
         cz = p[4] * v[2] + p[5];
         if (cw <= 0.0f) return false;
         const float px = vpa[0] * cw + vpa[1] * cx, py = vpa[2] * cw + vpa[3] * cy, pz = vpb[0] * cw + vpb[1] * cz;
-        X[i] = (px / cw + 1.0) * 0.5 * EFB_W * g_scale;
-        Y[i] = (-py / cw + 1.0) * 0.5 * EFB_H * g_scale;
+        X[i] = (px / cw + 1.0) * 0.5 * sc(EFB_W);
+        Y[i] = (-py / cw + 1.0) * 0.5 * sc(EFB_H);
         Z[i] = (pz / cw + 1.0) * 0.5;
     }
     const double ux = X[1] - X[0], uy = Y[1] - Y[0], uz = Z[1] - Z[0];
@@ -2529,7 +2553,7 @@ static void apply_state(const PixelState& st, int prim) {
             glDisable(GL_SCISSOR_TEST);
         } else {
             glEnable(GL_SCISSOR_TEST);
-            glScissor(x0 * g_scale, (EFB_H - y1) * g_scale, (x1 - x0) * g_scale, (y1 - y0) * g_scale);
+            scissor_efb(x0, y0, x1, y1);
         }
     }
     // Everything above has now been compared against bp, so it becomes the reference.
@@ -2564,7 +2588,7 @@ static uint32_t g_present_count;
 // two) are read back as IA8, alpha then intensity, in 4x4 tiles. A depth copy into the
 // colour formats is not encoded.
 static void copy_writeback(const EfbCopyCmd& c) {
-    const uint32_t fmt = c.format & 0xF, w = c.dst_w, h = c.dst_h, s = (uint32_t)g_scale;
+    const uint32_t fmt = c.format & 0xF, w = c.dst_w, h = c.dst_h;
     const bool one_byte = fmt == 1 || (fmt >= 7 && fmt <= 10);
     const bool two_byte = fmt == 3 || fmt == 11 || fmt == 12;
     const bool colour = fmt == 4 || fmt == 5 || fmt == 6;
@@ -2578,13 +2602,16 @@ static void copy_writeback(const EfbCopyCmd& c) {
         copy_writeback_done(c.writeback_ticket, {});
         return;
     }
-    std::vector<uint8_t> px((size_t)w * s * h * s * 4);
+    const int pw = sc((int)w), ph = sc((int)h);
+    std::vector<uint8_t> px((size_t)pw * ph * 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glReadPixels(0, 0, (GLsizei)(w * s), (GLsizei)(h * s), GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glReadPixels(0, 0, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    // The middle of the hardware pixel's block of samples.
     auto at = [&](uint32_t x, uint32_t y) {
         x = std::min(x, w - 1);
         y = std::min(y, h - 1);
-        return &px[(((size_t)y * s + s / 2) * w * s + (size_t)x * s + s / 2) * 4];
+        const size_t sx = (size_t)(sc((int)x) + sc((int)x + 1)) / 2, sy = (size_t)(sc((int)y) + sc((int)y + 1)) / 2;
+        return &px[(sy * pw + sx) * 4];
     };
     std::vector<uint8_t> encoded(bytes);
     uint8_t* out = encoded.data();
@@ -2639,7 +2666,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
             glGenTextures(1, &t.tex);
             t.w = c.dst_w; t.h = c.dst_h; t.levels = 1; t.efb = true;
             glBindTexture(GL_TEXTURE_2D, t.tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c.dst_w * g_scale, c.dst_h * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc((int)c.dst_w), sc((int)c.dst_h), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         }
         t.last_used = g_render_frame;
@@ -2648,7 +2675,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         t.depth = c.depth;
         glBindFramebuffer(GL_FRAMEBUFFER, g_copy_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
-        glViewport(0, 0, c.dst_w * g_scale, c.dst_h * g_scale);
+        glViewport(0, 0, sc((int)c.dst_w), sc((int)c.dst_h));
         glUseProgram(g_copy_prog);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g_efb_color);
@@ -2683,7 +2710,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
             (void)size_parsed;
             const bool by_size = size_w && c.dst_w == size_w && c.dst_h == size_h;
             if (copydump && (by_size || (copydump_frame && g_present_count + 1 == copydump_frame))) {
-                const int w = c.dst_w * g_scale, h = c.dst_h * g_scale;
+                const int w = sc((int)c.dst_w), h = sc((int)c.dst_h);
                 std::vector<uint8_t> px((size_t)w * h * 4), out((size_t)w * h * 4);
                 glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
                 char path[512];
@@ -2711,7 +2738,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
     if (c.clear) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, c.src_w * g_scale, c.src_h * g_scale);
+        scissor_efb((int)c.src_x, (int)c.src_y, (int)(c.src_x + c.src_w), (int)(c.src_y + c.src_h));
         GLbitfield bits = 0;
         glColorMask(c.clear_color, c.clear_color, c.clear_color, c.clear_alpha);
         if (c.clear_color || c.clear_alpha) bits |= GL_COLOR_BUFFER_BIT;
@@ -2754,10 +2781,11 @@ static void write_frame_png(const char* path, const std::vector<uint8_t>& px, in
 }
 
 static void dump_efb(const EfbCopyCmd& c) {
-    int w = c.src_w * g_scale, h = c.src_h * g_scale;
+    const EfbRect r = efb_rect((int)c.src_x, (int)c.src_y, (int)(c.src_x + c.src_w), (int)(c.src_y + c.src_h));
+    const int w = r.w, h = r.h;
     std::vector<uint8_t> px((size_t)w * h * 4), flipped((size_t)w * h * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
-    glReadPixels(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glReadPixels(r.x, r.y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     for (int y = 0; y < h; y++) {
         memcpy(&flipped[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4], (size_t)w * 4);
         for (int x = 0; x < w; x++) flipped[((size_t)y * w + x) * 4 + 3] = 255;
@@ -2776,6 +2804,24 @@ static GLuint g_output_fbo = 0;
 // Blit a rect of a texture laid out like the EFB (guest row r at GL row h - 1 - r) to the
 // output, letterboxed to 4:3.
 static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh);
+// Where in the output a frame is shown: letterboxed to 4:3, or to the widescreen aspect for
+// a frame drawn wide.
+static EfbRect output_viewport(bool wide) {
+    const int w = g_win_w, h = g_win_h;
+    int vw, vh;
+    if (wide) {
+        const float aspect = (4.0f / 3.0f) / g_wide_s;
+        vw = w, vh = (int)lroundf(w / aspect);
+        if (vh > h) { vh = h; vw = (int)lroundf(h * aspect); }
+    } else {
+        vw = w, vh = w * 3 / 4;
+        if (vh > h) { vh = h; vw = h * 4 / 3; }
+    }
+    return {(w - vw) / 2, (h - vh) / 2, vw, vh};
+}
+// The guest rect last presented (blit_rect_to_output), which match-output scales to fill
+// the output: the picture, as the display copy or XFB made it.
+static uint32_t g_shown_w = 640, g_shown_h = 480;
 static void blit_to_output(const EfbCopyCmd& c, GLuint src_tex) {
     blit_rect_to_output(src_tex, EFB_W, EFB_H, c.src_x, c.src_y, c.src_w, c.src_h);
 }
@@ -2791,18 +2837,10 @@ static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, 
     glViewport(0, 0, g_win_w, g_win_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    // Letterbox to 4:3, or to the widescreen aspect for a frame drawn wide.
-    int w = g_win_w, h = g_win_h;
-    if (g_present_wide) {
-        const float aspect = (4.0f / 3.0f) / g_wide_s;
-        int vw = w, vh = (int)lroundf(w / aspect);
-        if (vh > h) { vh = h; vw = (int)lroundf(h * aspect); }
-        glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
-    } else {
-        int vw = w, vh = w * 3 / 4;
-        if (vh > h) { vh = h; vw = h * 4 / 3; }
-        glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
-    }
+    const EfbRect vp = output_viewport(g_present_wide);
+    glViewport(vp.x, vp.y, vp.w, vp.h);
+    g_shown_w = rw;
+    g_shown_h = rh;
     glUseProgram(g_blit_prog);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, src_tex);
@@ -2849,7 +2887,7 @@ static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
     x.h = h;
     glGenTextures(1, &x.tex);
     glBindTexture(GL_TEXTURE_2D, x.tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(w * g_scale), (GLsizei)(h * g_scale), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sc((int)w), sc((int)h), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glGenFramebuffers(1, &x.fbo);
@@ -2864,7 +2902,7 @@ static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
 }
 
 static void dump_xfb(const Xfb& x, uint32_t w) {
-    int pw = w * g_scale, ph = x.h * g_scale;
+    const int pw = sc((int)w), ph = sc((int)x.h);
     std::vector<uint8_t> px((size_t)pw * ph * 4), flipped((size_t)pw * ph * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, x.fbo);
     glReadPixels(0, 0, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -2888,8 +2926,11 @@ static Xfb* xfb_write(const EfbCopyCmd& c) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, x.fbo);
     glDisable(GL_SCISSOR_TEST);
-    glBlitFramebuffer(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, (c.src_x + c.src_w) * g_scale, (EFB_H - c.src_y) * g_scale,
-                      0, (h - row0 - rows) * g_scale, c.dst_w * g_scale, (h - row0) * g_scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    // Source in EFB rows, destination in the XFB's (row r of h at GL row h - 1 - r), each
+    // edge scaled on its own.
+    const EfbRect s = efb_rect((int)c.src_x, (int)c.src_y, (int)(c.src_x + c.src_w), (int)(c.src_y + c.src_h));
+    glBlitFramebuffer(s.x, s.y, s.x + s.w, s.y + s.h,
+                      0, sc((int)(h - row0 - rows)), sc((int)c.dst_w), sc((int)(h - row0)), GL_COLOR_BUFFER_BIT, GL_NEAREST);
     for (uint32_t r = row0; r < row0 + rows; r++)
         if (!x.written[r]) { x.written[r] = 1; x.written_rows++; }
     if (x.written_rows < h) return nullptr;
@@ -4410,7 +4451,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         ms_vbo = frametime_on() ? ms_since(t_start) - ms_tex : 0.0;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
-    glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+    glViewport(0, 0, sc(EFB_W), sc(EFB_H));
     glBindVertexArray(g_vao);
     uint32_t n_apply = 0;
     note_fullscreen_copies(b);
@@ -4715,7 +4756,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     glFinish();
                     for (size_t pi = 0; pi < probes.size(); pi++) {
                         uint8_t px[4] = {0, 0, 0, 0};
-                        const int gx = probes[pi].first * g_scale, gy = (EFB_H - 1 - probes[pi].second) * g_scale;
+                        const int gx = sc(probes[pi].first), gy = sc(EFB_H - 1 - probes[pi].second);
                         glReadPixels(gx, gy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
                         float depth = -1.0f;
                         glReadPixels(gx, gy, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
@@ -4740,7 +4781,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         c.copy.src_x, c.copy.src_y, c.copy.dest, c.copy.tex_id, c.copy.format, c.copy.to_xfb ? " (display)" : "");
             do_efb_copy(c.copy);
             if (frametime_on()) ms_copy += ms_since(t_copy);
-            glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+            glViewport(0, 0, sc(EFB_W), sc(EFB_H));
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             break;
@@ -4749,7 +4790,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             if (do_present) present(c.copy);
             presented = true;
             glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
-            glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+            glViewport(0, 0, sc(EFB_W), sc(EFB_H));
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             break;
@@ -4778,7 +4819,58 @@ static void panel_hide(const Batch& b) {
     }
 }
 
+// Match output (render_set_match_output). The scale that fills the rect a frame with a
+// scene is shown in, at the window's size: the picture's guest rect (g_shown_w by
+// g_shown_h) to the viewport, in whichever axis needs more, rounded up to the next step.
+// Widescreen shows the EFB's 640 columns wider than 4:3, so there the width decides and
+// the rows come out a little finer than the window's; a picture of fewer than 480 lines
+// shown 4:3 is stretched down the window, so there the rows decide.
+static bool g_match_output = false;
+static bool g_match_now = false;      // take the next answer at once: just turned on
+static float g_match_pending = 0.0f;  // an answer waiting to hold
+static int g_match_held = 0;          // frames it has
+static constexpr int kMatchHold = 8;
+
+static float match_output_scale() {
+    if (g_win_w <= 0 || g_win_h <= 0 || !g_shown_w || !g_shown_h) return g_scale;
+    const EfbRect vp = output_viewport(g_wide_s != 1.0f);
+    const float need = std::max((float)vp.w / (float)g_shown_w, (float)vp.h / (float)g_shown_h);
+    return quantize_scale(ceilf(need * 16.0f - 1e-3f) / 16.0f);
+}
+
+static void match_output_step() {
+    // Not before a frame has been presented: the picture's size isn't known until then.
+    if (!g_match_output || !g_present_count) return;
+    const float want = match_output_scale();
+    if (want == g_scale) {
+        g_match_now = false;
+        g_match_pending = 0.0f;
+        return;
+    }
+    if (want != g_match_pending) {
+        g_match_pending = want;
+        g_match_held = 0;
+    }
+    if (g_match_now || ++g_match_held >= kMatchHold) {
+        fprintf(stderr, "[scale] %dx%d output: internal scale %g -> %g\n", g_win_w, g_win_h, g_scale, want);
+        render_set_internal_scale(want);
+        g_match_now = false;
+        g_match_pending = 0.0f;
+    }
+}
+
+void render_set_match_output(bool on) {
+    if (on && !g_match_output) g_match_now = true;
+    g_match_output = on;
+}
+bool render_match_output() { return g_match_output; }
+void render_picture_size(int* w, int* h) {
+    *w = sc((int)g_shown_w);
+    *h = sc((int)g_shown_h);
+}
+
 bool render_execute(Batch& b) {
+    match_output_step();
     frame_observe(b, nullptr);
     panel_hide(b);
     wide_plan(b);

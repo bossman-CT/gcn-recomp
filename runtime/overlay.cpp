@@ -118,10 +118,10 @@ void reset_console() {
     plat_relaunch(g_argv);
 }
 
-void startup(char** argv, int& scale, bool& fullscreen, bool aspect_given) {
+void startup(char** argv, float& scale, bool& match_window, bool& fullscreen, bool aspect_given) {
     g_argv = argv;
     settings::load();
-    pages_startup(scale, fullscreen, aspect_given);
+    pages_startup(scale, match_window, fullscreen, aspect_given);
     if (const char* e = getenv("GCN_MENU_OPEN"); e && *e) {
         g_open_at = atoi(e);
         if (const char* c = strchr(e, ':')) g_open_menu = c + 1;
@@ -360,8 +360,22 @@ static void draw_setting(settings::Setting& s, float scale) {
     case settings::Type::Float: {
         float v = (float)s.value();
         ImGui::SetNextItemWidth(220.0f * scale);
-        if (ImGui::SliderFloat(label, &v, (float)s.lo(), (float)s.hi(), s.format_text() ? s.format_text() : "%.2f",
-                               ImGuiSliderFlags_AlwaysClamp))
+        const char* fmt = s.format_text() ? s.format_text() : "%.2f";
+        if (const double step = s.step_size(); step > 0.0) {
+            // A slider over the steps, labelled with the value itself (any value, which a
+            // file or --set may have put between two steps). Its label is ImGui's format,
+            // so a % in it is doubled.
+            const int n = (int)std::lround((s.hi() - s.lo()) / step);
+            int i = (int)std::lround((s.value() - s.lo()) / step);
+            char text[64];
+            snprintf(text, sizeof text, fmt, s.value());
+            std::string shown;
+            for (const char* p = text; *p; p++) shown += *p == '%' ? std::string("%%") : std::string(1, *p);
+            if (ImGui::SliderInt(label, &i, 0, n, shown.c_str(), ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput))
+                s.set_value(s.lo() + i * step);
+            break;
+        }
+        if (ImGui::SliderFloat(label, &v, (float)s.lo(), (float)s.hi(), fmt, ImGuiSliderFlags_AlwaysClamp))
             s.set_value(v);
         break;
     }

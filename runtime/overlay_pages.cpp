@@ -40,12 +40,33 @@ static auto& s_fullscreen = settings::toggle("graphics.fullscreen", "Graphics/Di
                                 .help("Borderless fullscreen on the window's display. F11 or Alt+Enter switches it too.")
                                 .on_change(apply_fullscreen);
 
+// The internal resolution: the window's own (render_set_match_output), or a multiple of the
+// console's. Either can change while the game runs.
+static void apply_scale();
+static auto& s_match_window =
+    settings::toggle("graphics.match_window", "Graphics/Rendering", "Match window")
+        .help("Draws the game at the window's own resolution, or the screen's in fullscreen, and follows the "
+              "window as it changes. --scale=window sets it for one run.")
+        .on_change([](bool) { apply_scale(); });
+static bool scale_free() { return !s_match_window.get(); }
 static auto& s_internal_scale =
-    settings::slider("graphics.internal_scale", "Graphics/Rendering", "Internal resolution", 2, 1, 8)
-        .format("%dx native")
+    settings::slider("graphics.internal_scale", "Graphics/Rendering", "Internal resolution", 2.0f, 1.0f, 8.0f)
+        .step(0.25)
+        .format("%.4gx native")
         .help("How many times the console's own resolution the game is drawn at: higher is sharper, and "
-              "slower. --scale sets it for one run.")
-        .on_change([](int v) { gx::render_set_internal_scale(v); });
+              "slower. --scale sets it for one run, to any fraction (--scale=2.3).")
+        .enabled_if(scale_free, "Match window sets it.")
+        .on_change([](float) { apply_scale(); });
+static void apply_scale() {
+    gx::render_set_match_output(s_match_window.get());
+    if (!s_match_window.get()) gx::render_set_internal_scale(s_internal_scale.get());
+}
+static void draw_scale_note() {
+    int w = 0, h = 0;
+    gx::render_picture_size(&w, &h);
+    if (w > 0 && h > 0)
+        ImGui::TextDisabled("Drawn at %dx%d (%.4gx).", w, h, gx::render_internal_scale());
+}
 
 // The renderer widens the picture itself (render_set_aspect), so this is the host's alone:
 // the guest never sees it, and it can change while the game runs.
@@ -89,15 +110,25 @@ static void draw_files() {
 }
 static const bool s_help = [] {
     add_draw("Graphics/Display", draw_aspect_note);
+    add_draw("Graphics/Rendering", draw_scale_note);
     add_draw("Help/About", draw_about);
     add_draw("Help/Keys", draw_keys);
     add_draw("Help/Files", draw_files);
     return true;
 }();
 
-void pages_startup(int& scale, bool& fullscreen, bool aspect_given) {
-    if (scale > 0) settings::set_override("graphics.internal_scale", std::to_string(scale).c_str());
-    else scale = s_internal_scale.get();
+void pages_startup(float& scale, bool& match_window, bool& fullscreen, bool aspect_given) {
+    if (match_window) {
+        settings::set_override("graphics.match_window", "on");
+    } else if (scale > 0.0f) {
+        char text[32];
+        snprintf(text, sizeof text, "%g", scale);
+        settings::set_override("graphics.internal_scale", text);
+        if (s_match_window.get()) settings::set_override("graphics.match_window", "off");
+    }
+    if (!(scale > 0.0f)) scale = s_internal_scale.get();
+    match_window = s_match_window.get();
+    gx::render_set_match_output(match_window);
     if (fullscreen) settings::set_override("graphics.fullscreen", "on");
     else fullscreen = s_fullscreen.get();
     if (aspect_given) {

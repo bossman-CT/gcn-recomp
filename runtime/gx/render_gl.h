@@ -12,7 +12,7 @@ constexpr int kMaxInternalScale = 8;
 // all before the game starts instead of at the moment each is first needed. Set before
 // render_init; nullptr (the default) builds every shader on first use.
 void render_set_shader_cache(const char* path);
-void render_init(int internal_scale);
+void render_init(float internal_scale);
 
 // Building a large cache takes a while -- after a change to the shaders every program is
 // compiled again, 6,000 of them in 25 s on a Quest 3 -- and a frontend that must keep
@@ -47,10 +47,25 @@ void render_set_shader_keys(const void* data, size_t size);
 bool render_shader_cache_compiling();
 
 // Re-scale the EFB between frames. Call only when a whole frame is about to be drawn:
-// it discards the EFB's contents and every texture an EFB copy has produced.
-void render_set_internal_scale(int scale);
+// it discards the EFB's contents and every texture an EFB copy has produced. The scale
+// may be fractional (2.25): it is kept to a step of 1/16, at which the EFB's 640x528 is a
+// whole number of pixels, within 1 to kMaxInternalScale. See graphics.md, "Internal
+// resolution".
+void render_set_internal_scale(float scale);
+float render_internal_scale();  // the scale the EFB has now
+// The last presented picture's size in pixels as drawn: its guest size at that scale.
+void render_picture_size(int* w, int* h);
 
 void render_set_window_size(int w, int h);
+
+// Match the output: before each flat frame (render_execute) the renderer picks the internal
+// scale itself, the smallest step that covers, pixel for pixel, the rect the picture is
+// shown in at the window's size (render_set_window_size) and the aspect frames with a scene
+// are shown at. A new window size is followed once it has held for a few frames, so a drag
+// doesn't re-make the EFB at every step. Off, the default, keeps the scale last set. The VR
+// paths never use it. --scale=window on the command line.
+void render_set_match_output(bool on);
+bool render_match_output();
 
 // ---- Widescreen ----
 // Show frames with a 3D scene at `aspect` (width over height, 16/9 say) instead of 4:3; 4/3

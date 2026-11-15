@@ -24,11 +24,12 @@ union SDL_Event;
 
 namespace overlay {
 
-// Reads settings.txt (settings::load). `scale` and `fullscreen` are the command line's
-// (0 and false when not given), which override the settings for this run; on return they
-// hold what the window and renderer should start with. `aspect_given`: --aspect or
-// GCN_ASPECT was, and render_set_aspect has it.
-void startup(char** argv, int& scale, bool& fullscreen, bool aspect_given);
+// Reads settings.txt (settings::load). `scale`, `match_window` and `fullscreen` are the
+// command line's (0 and false when not given: --scale=N, --scale=window, --fullscreen),
+// which override the settings for this run; on return they hold what the window and
+// renderer should start with, and render_set_match_output has the second. `aspect_given`:
+// --aspect or GCN_ASPECT was, and render_set_aspect has it.
+void startup(char** argv, float& scale, bool& match_window, bool& fullscreen, bool aspect_given);
 // Sets ImGui up on the window and its current GL context.
 void init(SDL_Window* win);
 // Whether the menu took the event, in which case nothing else should act on it.
@@ -54,7 +55,7 @@ void reset_console();
 // entries in the order made.
 void add_draw(const char* path, void (*draw)());
 // The pages' own startup and per-frame work.
-void pages_startup(int& scale, bool& fullscreen, bool aspect_given);
+void pages_startup(float& scale, bool& match_window, bool& fullscreen, bool aspect_given);
 void pages_frame();
 
 }  // namespace overlay

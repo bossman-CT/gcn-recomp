@@ -108,8 +108,8 @@ change a replay.
 holds what the in-game menu changed: `key = value` lines, only settings that differ from
 their defaults, and any line this build doesn't know, kept as it was. `--list-settings`
 prints every setting with its default and help. `--set=<key>=<value>` (repeatable) changes
-one for a single run without saving it, as `--scale`, `--fullscreen` and `--aspect` do for
-theirs. The file is written when the menu closes, two seconds after a change while it's
+one for a single run without saving it, as `--scale` (a multiple such as `2.25`, or
+`window`), `--fullscreen` and `--aspect` do for theirs. The file is written when the menu closes, two seconds after a change while it's
 open, and at exit, through a temporary file. A script that compares a replay's frames
 should pass `--settings=` a file that doesn't exist, so the frames don't depend on the
 machine's settings.
