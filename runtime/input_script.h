@@ -12,6 +12,8 @@
 // reads as plugged in for the whole run.
 // Buttons: A B X Y Z L R START UP DOWN LEFT RIGHT; stick: SL SR SU SD, all the way, or
 // as far as a number after them says (SR19); C stick: CL CR CU CD, likewise.
+// MX<n> and MY<n> move the mouse n counts each update (right and down positive), for a
+// filter that reads it (input_ports::raw).
 // GCN_INPUT_LOG=1 logs each press as it fires.
 //
 // `spec` null or empty falls back to the GCN_INPUT environment variable, which an
@@ -23,3 +25,5 @@ void input_script_init(const char* spec = nullptr);
 void input_script_apply(PadState& p, int port = 0);
 // The ports the script presses anything on, a bit per port (bit 0 the first).
 unsigned input_script_ports();
+// Whether a press is active on `port` now, and the mouse motion the active ones give.
+bool input_script_now(int port, int* mx, int* my);

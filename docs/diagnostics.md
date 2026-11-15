@@ -132,6 +132,8 @@ it saves to that file as a player's run would, which tests the round trip.
 `GCN_INPUT="frame:BUTTON:duration,..."` presses buttons at given submitted-frame counts; `+`
 joins buttons (`A+B`), and `SL SR SU SD` push the control stick all the way, or as far as a
 number after them says (`SR19`, 19 of 127), and `CL CR CU CD` do the same with the C stick.
+`MX<n>` and `MY<n>` move the mouse n counts each update. While a press is active it also
+stands in for the controller in `input_ports::raw`, which a game's aiming filter reads.
 Presses are counted in
 submitted frames, not wall-clock: display copies the guest has issued. For most games that
 is one per presented frame, but a game that renders its frame in parts (graphics.md, "Frames

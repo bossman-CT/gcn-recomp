@@ -483,6 +483,21 @@ void update() {
         input_script_apply(p, port);
         Raw r;
         read_raw(port, r);
+        // While a scripted press is active it stands in for the controller here too: its
+        // sticks as the raw ones, and its mouse motion (MX, MY) as the mouse.
+        int mx, my;
+        if (input_script_now(port, &mx, &my)) {
+            r.pad = true;
+            r.lx = ((int)p.stick_x - 128) / 100.0f;
+            r.ly = ((int)p.stick_y - 128) / 100.0f;
+            r.rx = ((int)p.cstick_x - 128) / 100.0f;
+            r.ry = ((int)p.cstick_y - 128) / 100.0f;
+            if (mx || my) {
+                r.mouse = true;
+                r.mx += (float)mx;
+                r.my += (float)my;
+            }
+        }
         set_raw(port, r);
         run_filters(port, p);
         if (g_filter) g_filter(port, p);
