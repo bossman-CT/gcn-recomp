@@ -2,6 +2,7 @@
 // (see dsp_hle.cpp) - this file only models the CPU-side registers.
 #include "../runtime.h"
 #include "dsp_hle.h"
+#include "ax.h"
 #include <cstdlib>
 #include <algorithm>
 #include <deque>
@@ -212,8 +213,13 @@ static void aid_block_done() {
     static int n;
     if (getenv("GCN_AXSTATS") && n++ % 400 == 0) fprintf(stderr, "[aid] block addr=%08X bytes=%u ctrl=%04X\n", g_aid_cur_addr, bytes, g_aid_ctrl);
     bytes = dma_fit("AI", g_aid_cur_addr, bytes);
-    if (bytes) audio_push_dma((const int16_t*)phys_ptr(g_aid_cur_addr), bytes / 4);
-    if (bytes) aid_capture((const int16_t*)phys_ptr(g_aid_cur_addr), bytes / 4, now_ticks() > g_aid_due, g_aid_cur_addr, g_aid_queued);
+    if (bytes) {
+        // The AX HLE's enhanced mix where it has one for this block, else memory.
+        const int16_t* src = ax_host_block(g_aid_cur_addr, bytes / 4);
+        if (!src) src = (const int16_t*)phys_ptr(g_aid_cur_addr);
+        audio_push_dma(src, bytes / 4);
+        aid_capture(src, bytes / 4, now_ticks() > g_aid_due, g_aid_cur_addr, g_aid_queued);
+    }
     g_aid_frames_delivered += bytes / 4;
     g_aid_blocks_left = 0;
     if (g_aid_ctrl & 0x8000) aid_start_block();

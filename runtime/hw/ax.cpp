@@ -4,10 +4,16 @@
 // mixer control word comes in two forms, picked by the ucode's fingerprint at boot.
 #include "../runtime.h"
 #include "ax.h"
+#include "../settings.h"
+#include "../sinc.h"
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <initializer_list>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -27,6 +33,9 @@ int32_t* const g_out[OUT_COUNT] = {g_left, g_right, g_auxa_l, g_auxa_r, g_auxb_l
 // HLE reads all but this one too.
 constexpr uint32_t kCompactMixerHashes[] = {0x4E8A8B21};
 bool g_compact_mixer;
+// That build's PB also ends before the low-pass filter every later one has (Dolphin's AX
+// HLE leaves the filter's words out for it too), so it is read and written 4 words shorter.
+bool g_has_lpf;
 
 // ---- parameter block (word indices into the big-endian u16 array) ----
 enum {
@@ -40,8 +49,10 @@ enum {
     PB_COEFS = 63, PB_GAIN = 79, PB_PRED_SCALE = 80, PB_YN1 = 81, PB_YN2 = 82,
     PB_RATIO_HI = 83, PB_RATIO_LO = 84, PB_FRAC = 85, PB_LAST = 86,
     PB_LOOP_PRED_SCALE = 90, PB_LOOP_YN1 = 91, PB_LOOP_YN2 = 92,
-    PB_WORDS = 93,
+    PB_LPF_ON = 93, PB_LPF_YN1 = 94, PB_LPF_A0 = 95, PB_LPF_B0 = 96,  // not in the 2001 build's PB
+    PB_WORDS = 97,
 };
+int g_pb_words = PB_LPF_ON;  // how much of it this ucode's PB has: PB_WORDS with the filter
 
 struct PB {
     uint16_t w[PB_WORDS];
@@ -50,10 +61,11 @@ struct PB {
 };
 
 void read_pb(uint32_t addr, PB& pb) {
-    for (int i = 0; i < PB_WORDS; i++) pb.w[i] = mem_r16(addr + 2 * i);
+    for (int i = 0; i < g_pb_words; i++) pb.w[i] = mem_r16(addr + 2 * i);
+    for (int i = g_pb_words; i < PB_WORDS; i++) pb.w[i] = 0;
 }
 void write_pb(uint32_t addr, const PB& pb) {
-    for (int i = 0; i < PB_WORDS; i++) mem_w16(addr + 2 * i, pb.w[i]);
+    for (int i = 0; i < g_pb_words; i++) mem_w16(addr + 2 * i, pb.w[i]);
 }
 
 inline uint8_t aram_byte(uint32_t a) { return g_aram[a & (ARAM_SIZE - 1)]; }
@@ -127,12 +139,107 @@ struct Accel {
     void finish() { pb.set32(PB_CUR_HI, cur); }
 };
 
-void mix_add(int32_t* out, const int16_t* in, int n, PB& pb, int vol_idx, bool ramp) {
+// ---- sample rate conversion ----
+// A PB's SRC type picks how a voice is resampled to 32 kHz: 0 a 4-tap polyphase filter, 1
+// linear interpolation, 2 none (each output sample repeats the newest input sample). The
+// polyphase filter's coefficients come from one of three tables in the DSP's coefficient
+// ROM, the PB's coef select picking which and the top 7 bits of the position's fraction
+// one of 128 phases. The AX library names the tables by their cutoff for a 32 kHz voice, 8,
+// 12 and 16 kHz: half, three quarters and all of the input's Nyquist frequency, so that a
+// voice pitched up far enough to alias can be given a lower one. The ROM is not ours to
+// ship, so tables of that shape are designed here, windowed sincs with those cutoffs, each
+// phase scaled to unity gain: close to the console's, not bit-exact.
+constexpr int SRC_PHASES = 128, SRC_TAPS = 4, SRC_TABLES = 3;
+int16_t g_src_coefs[SRC_TABLES][SRC_PHASES][SRC_TAPS];
+
+void make_src_tables() {
+    const double kCutoff[SRC_TABLES] = {0.5, 0.75, 1.0};
+    for (int t = 0; t < SRC_TABLES; t++)
+        for (int p = 0; p < SRC_PHASES; p++) {
+            double h[SRC_TAPS], sum = 0;
+            for (int k = 0; k < SRC_TAPS; k++) {
+                // Taps run oldest first; the output point lies between taps 1 and 2, p/128
+                // of the way. d is tap k's distance from it, in input samples (-2 to 2).
+                const double d = k - 1 - (double)p / SRC_PHASES;
+                const double x = sinc::kPi * kCutoff[t] * d;
+                const double sinc = d == 0 ? 1 : std::sin(x) / x;
+                // Kaiser windows for the two lower cutoffs, Hamming for the full band.
+                const double win = t == 2 ? 0.54 + 0.46 * std::cos(sinc::kPi * d / 2)
+                                          : sinc::bessel_i0(7 * std::sqrt(std::max(0.0, 1 - d * d / 4))) / sinc::bessel_i0(7);
+                h[k] = sinc * win;
+                sum += h[k];
+            }
+            for (int k = 0; k < SRC_TAPS; k++)
+                g_src_coefs[t][p][k] = (int16_t)std::min<long>(std::lround(h[k] / sum * 32768), 32767);
+        }
+}
+
+// For GCN_AXSTATS: voice-milliseconds by SRC (polyphase tables 0-2, linear, none), and with the filter on.
+int g_stat_src[5], g_stat_lpf;
+
+// ---- Audio quality: Enhanced ----
+// The console's conversions are cheap ones. A voice pitched down (most sounds are recorded
+// below 32 kHz) comes out with images of itself above its own Nyquist frequency, which
+// linear interpolation leaves only a few dB down, and one pitched up with aliases: grit
+// over the top. Enhanced resamples each voice with a 32-tap windowed sinc as well, cutting
+// at 0.9 of the lower of its input's and the output's Nyquist frequency, and plays that.
+//
+// The guest never sees it. Everything that reaches guest memory -- the aux sends its
+// effects read (a game can follow their level, as some do to move a speaker's mouth), the
+// mix the DMA buffer holds -- is still the console's. The enhanced voices go into the main
+// mix as a difference from the console's (g_enh_l/r), output() keeps the result beside the
+// block it wrote, and the AI DMA plays that in its place (ax_host_block), so the setting
+// changes nothing the guest computes or holds, and needs no logging for replays.
+auto& s_quality = settings::choice("audio.quality", "Audio/Quality", "Audio quality", {"Console", "Enhanced"}, 0)
+                      .help("Console: the game's sounds are resampled the way the console does it. Enhanced: with a "
+                            "sharper filter, for a clearer top end, without the console's grit. The game itself "
+                            "sees no difference, so replays and netplay are unaffected.");
+bool g_enh_on;  // latched for each command list
+
+constexpr int ENH_TAPS = 32, ENH_BANKS = 16;
+// One kernel per cutoff, in sixteenths of the input's Nyquist frequency, made when first used.
+std::unique_ptr<sinc::Kernel> g_enh_kernels[ENH_BANKS];
+const sinc::Kernel& enh_kernel(uint32_t ratio) {
+    const int b = ratio <= 0x10000 ? ENH_BANKS : std::max(1, (int)((uint64_t)ENH_BANKS * 0x10000 / ratio));
+    auto& k = g_enh_kernels[b - 1];
+    if (!k) k = std::make_unique<sinc::Kernel>(ENH_TAPS, 256, 0.9 * b / ENH_BANKS, 7.0);
+    return *k;
+}
+
+// A voice's input history for the sinc, by PB address: more than the PB's four samples.
+// It starts again whenever the PB's position or newest samples are not as it left them (a
+// new sound in that voice, or one the CPU moved).
+struct EnhVoice {
+    float h[2 * ENH_TAPS];  // doubled ring, so the window is contiguous
+    int at = 0;
+    uint32_t cur = ~0u;
+    int16_t last[4] = {};
+    int16_t lpf_yn1 = 0;
+    void push(int16_t v) {
+        h[at] = h[at + ENH_TAPS] = v;
+        at = at + 1 == ENH_TAPS ? 0 : at + 1;
+    }
+    const float* window() const { return &h[at]; }
+    void restart(const int16_t* newest, int16_t yn1) {
+        std::fill(std::begin(h), std::end(h), 0.0f);
+        at = 0;
+        for (int k = 0; k < 4; k++) push(newest[k]);
+        lpf_yn1 = yn1;
+    }
+};
+std::unordered_map<uint32_t, EnhVoice> g_enh_voices;
+int32_t g_enh_l[SPF], g_enh_r[SPF];  // the enhanced main mix less the console's
+
+// out[] += in[] at the output's volume, ramping it. With alt (the voice's enhanced
+// samples), alt_diff[] also gets their difference from in[] at the same volume.
+void mix_add(int32_t* out, const int16_t* in, int n, PB& pb, int vol_idx, bool ramp, const int16_t* alt = nullptr,
+             int32_t* alt_diff = nullptr) {
     uint16_t vol = pb.w[vol_idx];
     uint16_t delta = ramp ? pb.w[vol_idx + 1] : 0;
     for (int i = 0; i < n; i++) {
-        int32_t s = (int32_t)(((int64_t)in[i] * vol) >> 15);
-        out[i] += std::clamp(s, -32767, 32767);
+        const int32_t s = std::clamp((int32_t)(((int64_t)in[i] * vol) >> 15), -32767, 32767);
+        out[i] += s;
+        if (alt) alt_diff[i] += std::clamp((int32_t)(((int64_t)alt[i] * vol) >> 15), -32767, 32767) - s;
         vol += delta;
     }
     pb.w[vol_idx] = vol;
@@ -189,38 +296,82 @@ Routing decode_mixer_control(uint16_t mc) {
 }
 
 extern int g_stat_voices;
-void process_voice(PB& pb, int offset) {
+void process_voice(PB& pb, int offset, uint32_t pb_addr) {
     if (!pb.w[PB_RUNNING]) return;
     if (offset == 0) g_stat_voices++;
     int16_t samples[SPMS];
     Accel acc(pb);
-    // Sample rate conversion: linear interpolation, for the linear and polyphase modes alike.
+    // Sample rate conversion (above). last[] holds the newest four input samples, oldest first.
     uint32_t ratio = pb.get32(PB_RATIO_HI);
     uint32_t pos = pb.w[PB_FRAC];
     int16_t* last = (int16_t*)&pb.w[PB_LAST];
-    uint16_t src_type = pb.w[PB_SRC_TYPE];
+    const uint16_t src_type = pb.w[PB_SRC_TYPE];
+    const int table = std::min<int>(pb.w[PB_COEF_SELECT], SRC_TABLES - 1);
+    g_stat_src[src_type == 0 ? table : src_type == 2 ? 4 : 3]++;
+    // Enhanced (above), for a voice that is being resampled: not one played as it is.
+    int16_t enh[SPMS];
+    EnhVoice* ev = nullptr;
+    const sinc::Kernel* kern = nullptr;
+    if (g_enh_on && src_type != 2 && !(ratio == 0x10000 && (pos & 0xFFFF) == 0)) {
+        ev = &g_enh_voices[pb_addr];
+        if (ev->cur != pb.get32(PB_CUR_HI) || memcmp(ev->last, last, sizeof ev->last))
+            ev->restart(last, (int16_t)pb.w[PB_LPF_YN1]);
+        kern = &enh_kernel(ratio);
+    }
     for (int i = 0; i < SPMS; i++) {
         int32_t frac = pos & 0xFFFF;
-        if (src_type == 2) samples[i] = last[3];
-        else samples[i] = (int16_t)(last[2] + (((last[3] - last[2]) * frac) >> 16));
+        if (src_type == 0) {
+            const int16_t* c = g_src_coefs[table][frac >> 9];
+            const int64_t s = (int64_t)last[0] * c[0] + (int64_t)last[1] * c[1] + (int64_t)last[2] * c[2] + (int64_t)last[3] * c[3];
+            samples[i] = (int16_t)std::clamp<int64_t>(s >> 15, -32768, 32767);
+        } else if (src_type == 2) {
+            samples[i] = last[3];
+        } else {
+            samples[i] = (int16_t)(last[2] + (((last[3] - last[2]) * frac) >> 16));
+        }
+        if (ev) enh[i] = (int16_t)std::clamp((int32_t)std::lround(kern->apply(ev->window(), frac / 65536.0)), -32768, 32767);
         pos += ratio;
         while (pos >= 0x10000) {
             last[0] = last[1]; last[1] = last[2]; last[2] = last[3];
             last[3] = acc.sample();
+            if (ev) ev->push(last[3]);
             pos -= 0x10000;
         }
     }
     pb.w[PB_FRAC] = (uint16_t)pos;
     acc.finish();
+    if (ev) {
+        ev->cur = pb.get32(PB_CUR_HI);
+        memcpy(ev->last, last, sizeof ev->last);
+    }
     // Volume envelope
     for (int i = 0; i < SPMS; i++) {
         uint16_t v = pb.w[PB_VOL];
         samples[i] = (int16_t)std::clamp(((int32_t)samples[i] * v) >> 15, -32767, 32767);
+        if (ev) enh[i] = (int16_t)std::clamp(((int32_t)enh[i] * v) >> 15, -32767, 32767);
         pb.w[PB_VOL] = (uint16_t)(v + (int16_t)pb.w[PB_VOL_DELTA]);
     }
+    // The one-pole low-pass filter a voice can have: y = a0 x + b0 y[-1], in Q15.
+    if (g_has_lpf && pb.w[PB_LPF_ON]) {
+        if (offset == 0) g_stat_lpf++;
+        int16_t yn1 = (int16_t)pb.w[PB_LPF_YN1];
+        const int64_t a0 = pb.w[PB_LPF_A0], b0 = pb.w[PB_LPF_B0];
+        for (int i = 0; i < SPMS; i++) yn1 = samples[i] = (int16_t)std::clamp<int64_t>((a0 * samples[i] + b0 * yn1) >> 15, -32768, 32767);
+        pb.w[PB_LPF_YN1] = (uint16_t)yn1;
+        if (ev) {
+            yn1 = ev->lpf_yn1;
+            for (int i = 0; i < SPMS; i++) yn1 = enh[i] = (int16_t)std::clamp<int64_t>((a0 * enh[i] + b0 * yn1) >> 15, -32768, 32767);
+            ev->lpf_yn1 = yn1;
+        }
+    }
     const Routing r = decode_mixer_control(pb.w[PB_MIXER_CONTROL]);
-    for (int out = 0; out < OUT_COUNT; out++)
-        if (r.on & (1u << out)) mix_add(g_out[out] + offset, samples, SPMS, pb, PB_MIXER + 2 * out, r.ramp & (1u << out));
+    for (int out = 0; out < OUT_COUNT; out++) {
+        if (!(r.on & (1u << out))) continue;
+        // Only main left and right play enhanced: everything else stays the console's.
+        const bool alt = ev && (out == OUT_L || out == OUT_R);
+        mix_add(g_out[out] + offset, samples, SPMS, pb, PB_MIXER + 2 * out, r.ramp & (1u << out), alt ? enh : nullptr,
+                (out == OUT_L ? g_enh_l : g_enh_r) + offset);
+    }
 }
 
 void process_pb_list(uint32_t pb_addr) {
@@ -235,9 +386,9 @@ void process_pb_list(uint32_t pb_addr) {
             for (int k = 0; k < n; k++) {
                 uint16_t idx = mem_r16(upd), val = mem_r16(upd + 2);
                 upd += 4;
-                if (idx < PB_WORDS) pb.w[idx] = val;
+                if (idx < g_pb_words) pb.w[idx] = val;
             }
-            process_voice(pb, ms * SPMS);
+            process_voice(pb, ms * SPMS, pb_addr);
         }
         write_pb(pb_addr, pb);
         pb_addr = pb.get32(PB_NEXT_HI);
@@ -260,6 +411,8 @@ void set_bufs(uint32_t addr, std::initializer_list<int32_t*> bufs) {
 // Replace the main buffers with one downloaded mono buffer: L = R = in (0x07), or
 // L = -in, R = in (0x11); surround cleared either way.
 void set_main_from(uint32_t addr, bool opposite) {
+    std::fill(std::begin(g_enh_l), std::end(g_enh_l), 0);
+    std::fill(std::begin(g_enh_r), std::end(g_enh_r), 0);
     for (int i = 0; i < SPF; i++, addr += 4) {
         int32_t v = (int32_t)mem_r32(addr);
         g_left[i] = opposite ? -v : v;
@@ -281,6 +434,8 @@ void download_and_mix(uint32_t addr, uint16_t vol_main, uint16_t vol_auxa, uint1
 }
 
 void setup(uint32_t addr) {
+    std::fill(std::begin(g_enh_l), std::end(g_enh_l), 0);
+    std::fill(std::begin(g_enh_r), std::end(g_enh_r), 0);
     int32_t* bufs[9] = {g_left, g_right, g_surround, g_auxa_l, g_auxa_r, g_auxa_s, g_auxb_l, g_auxb_r, g_auxb_s};
     for (int b = 0; b < 9; b++) {
         int32_t init = (int32_t)(((uint32_t)mem_r16(addr) << 16) | mem_r16(addr + 2));
@@ -292,17 +447,44 @@ void setup(uint32_t addr) {
 
 int g_stat_voices, g_stat_frames, g_stat_peak;
 
+// The last few blocks output() wrote, with the enhanced mix beside each (big endian, as in
+// guest memory), for ax_host_block.
+struct HostBlock {
+    uint32_t addr = ~0u;
+    uint16_t console[2 * SPF], enhanced[2 * SPF];
+};
+HostBlock g_host_blocks[4];
+unsigned g_host_next;
+int g_stat_host_played, g_stat_host_missed;  // DMA blocks played from them, and not, with Enhanced on
+
 void output(uint32_t surround_addr, uint32_t lr_addr) {
     for (int i = 0; i < SPF; i++) g_stat_peak = std::max(g_stat_peak, std::abs(g_left[i]));
     if (++g_stat_frames % 400 == 0 && getenv("GCN_AXSTATS")) {
         fprintf(stderr, "[ax] frames=%d voices(running, last frame)=%d peak=%d out=%08X\n", g_stat_frames, g_stat_voices, g_stat_peak, lr_addr);
-        g_stat_peak = 0;
+        fprintf(stderr, "[ax] voice-ms by SRC: polyphase 8k=%d 12k=%d 16k=%d, linear=%d, none=%d; voice-frames with the low-pass on=%d\n",
+                g_stat_src[0], g_stat_src[1], g_stat_src[2], g_stat_src[3], g_stat_src[4], g_stat_lpf);
+        if (g_enh_on)
+            fprintf(stderr, "[ax] enhanced: %d blocks played, %d not (the guest had changed them)\n", g_stat_host_played, g_stat_host_missed);
+        for (int& n : g_stat_src) n = 0;
+        g_stat_peak = g_stat_lpf = g_stat_host_played = g_stat_host_missed = 0;
     }
     for (int i = 0; i < SPF; i++) mem_w32(surround_addr + 4 * i, (uint32_t)g_surround[i]);
     for (int i = 0; i < SPF; i++) {
         int32_t l = std::clamp(g_left[i], -32767, 32767), r = std::clamp(g_right[i], -32767, 32767);
         mem_w16(lr_addr + 4 * i, (uint16_t)r);       // interleaved R, L
         mem_w16(lr_addr + 4 * i + 2, (uint16_t)l);
+    }
+    if (!g_enh_on) {
+        for (HostBlock& b : g_host_blocks) b.addr = ~0u;
+    } else {
+        HostBlock& b = g_host_blocks[g_host_next++ % 4];
+        b.addr = lr_addr;
+        memcpy(b.console, phys_ptr(lr_addr), sizeof b.console);
+        for (int i = 0; i < SPF; i++) {
+            const int32_t l = std::clamp(g_left[i] + g_enh_l[i], -32767, 32767), r = std::clamp(g_right[i] + g_enh_r[i], -32767, 32767);
+            b.enhanced[2 * i] = GCN_BSWAP16((uint16_t)r);
+            b.enhanced[2 * i + 1] = GCN_BSWAP16((uint16_t)l);
+        }
     }
 }
 
@@ -312,6 +494,10 @@ void ax_init(uint32_t ucode_hash) {
     g_compact_mixer = false;
     for (uint32_t h : kCompactMixerHashes)
         if (h == ucode_hash) g_compact_mixer = true;
+    g_has_lpf = !g_compact_mixer;
+    g_pb_words = g_has_lpf ? PB_WORDS : PB_LPF_ON;
+    static const bool tables = (make_src_tables(), true);
+    (void)tables;
     LOG(LOG_DSP, "AX: ucode %08X, mixer control %s", ucode_hash, g_compact_mixer ? "compact (2001)" : "a bit per output");
 }
 
@@ -326,7 +512,7 @@ void ax_process_cmdlist(uint32_t addr, uint16_t size) {
         case 0x00: setup(rd32()); break;
         case 0x01: { uint32_t a = rd32(); uint16_t vm = rd(), va = rd(), vb = rd(); download_and_mix(a, vm, va, vb); break; }
         case 0x02: pb_addr = rd32(); break;
-        case 0x03: g_stat_voices = 0; process_pb_list(pb_addr); break;
+        case 0x03: g_stat_voices = 0; g_enh_on = s_quality.get() == 1; process_pb_list(pb_addr); break;
         case 0x04: { uint32_t w = rd32(), r = rd32(); write_bufs(w, {g_auxa_l, g_auxa_r, g_auxa_s});
                      add_bufs(r, {g_left, g_right, g_surround}); break; }
         case 0x05: { uint32_t w = rd32(), r = rd32(); write_bufs(w, {g_auxb_l, g_auxb_r, g_auxb_s});
@@ -379,4 +565,18 @@ void ax_process_cmdlist(uint32_t addr, uint16_t size) {
         }
         }
     }
+}
+
+const int16_t* ax_host_block(uint32_t addr, uint32_t frames) {
+    if (!g_enh_on || frames != SPF) return nullptr;
+    // Newest first: a guest that double-buffers leaves an older block at the same address.
+    for (unsigned k = 1; k <= 4; k++) {
+        const HostBlock& b = g_host_blocks[(g_host_next - k) % 4];
+        if (((b.addr ^ addr) & 0x01FFFFFF) == 0 && !memcmp(phys_ptr(addr), b.console, sizeof b.console)) {
+            g_stat_host_played++;
+            return (const int16_t*)b.enhanced;
+        }
+    }
+    g_stat_host_missed++;
+    return nullptr;
 }
