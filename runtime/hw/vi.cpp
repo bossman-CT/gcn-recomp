@@ -7,7 +7,20 @@
 static uint16_t g_vi[0x80];
 static uint64_t g_frame_start;
 static constexpr uint64_t FIELD_TICKS = (uint64_t)(TB_FREQ / 59.94);
+// The length of a field as this VI scans it: the console's, divided by the rate
+// (vi_set_rate, GCN_VI_RATE). A game that paces itself on the retrace -- waiting for one
+// or more fields a frame -- runs N times as many frames a second on a VI N times as fast;
+// its per-frame steps are then the game's to scale (step.cpp).
+static uint64_t g_field_ticks = FIELD_TICKS;
+static double g_rate = 1.0;
 std::atomic<uint32_t> g_vi_retrace_count{0};
+
+void vi_set_rate(double n) {
+    if (!(n >= 1.0 && n <= 8.0)) return;
+    g_rate = n;
+    g_field_ticks = (uint64_t)((double)FIELD_TICKS / n + 0.5);
+}
+double vi_rate() { return g_rate; }
 std::atomic<uint32_t> g_vi_xfb_addr{0};
 
 static void vi_update_irq() {
@@ -36,11 +49,12 @@ static void vi_retrace() {
         if (hi & 0x1000) hi |= 0x8000;
     }
     vi_update_irq();
-    event_schedule(g_frame_start + FIELD_TICKS, vi_retrace);
+    event_schedule(g_frame_start + g_field_ticks, vi_retrace);
 }
 
 void vi_init() {
-    event_schedule_in(FIELD_TICKS, vi_retrace);
+    if (const char* e = getenv("GCN_VI_RATE")) vi_set_rate(atof(e));
+    event_schedule_in(g_field_ticks, vi_retrace);
 }
 
 // The lines the VI scans out: ACV per field, two fields unless progressive (DCR.NIN).
@@ -60,8 +74,8 @@ static uint32_t beam_position() {
     uint32_t hlw = g_vi[0x06 >> 1] & 0x1FF;
     if (!hlw) hlw = 429;
     uint64_t per_field = (uint64_t)(vi_progressive() ? 524 : 525) * hlw;
-    uint64_t t = std::min<uint64_t>(now_ticks() - g_frame_start, FIELD_TICKS - 1);
-    uint64_t pos = g_field * per_field + t * per_field / FIELD_TICKS;
+    uint64_t t = std::min<uint64_t>(now_ticks() - g_frame_start, g_field_ticks - 1);
+    uint64_t pos = g_field * per_field + t * per_field / g_field_ticks;
     return (uint32_t)((pos / (2 * hlw) + 1) << 16 | (pos % (2 * hlw) + 1));
 }
 

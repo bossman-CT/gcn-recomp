@@ -17,6 +17,7 @@ namespace {
 
 struct Entry {
     uint32_t key;  // poll sequence number (v2) or presented frame (v1)
+    uint64_t tick; // the poll's virtual time (v6; 0 in older logs)
     uint8_t chan;
     PadState s;
 };
@@ -55,8 +56,20 @@ PadState g_replay_state[4];
 bool g_replay_loaded;
 bool g_replay_by_frame;          // a v1 log
 uint32_t g_replay_last_key;      // the last change, or the end marker when the log has one
+bool g_replay_has_ticks;         // a v6 log: every pad line carries its poll's virtual time
+uint64_t g_replay_last_tick;     // the virtual time of g_replay_last_key
+bool g_by_time_wanted;           // input_replay_by_time, GCN_REPLAY_BY_TIME
 
 uint32_t replay_key() { return g_replay_by_frame ? gx_frames_submitted() : g_poll_seq; }
+
+// Replaying by virtual time (input_replay_by_time): each change is applied at the first poll
+// at or after the virtual time it was recorded at, rather than at the same poll. Only a v6
+// log carries the times; an older one is replayed by poll whatever was asked.
+bool by_time() { return g_by_time_wanted && g_replay_has_ticks; }
+bool entry_due(const Entry& e) { return by_time() ? e.tick <= now_ticks() : e.key <= replay_key(); }
+bool replay_running() {
+    return g_replay_loaded && (by_time() ? now_ticks() <= g_replay_last_tick : replay_key() <= g_replay_last_key);
+}
 
 // The clock's jumps, in the order recorded (see input_log_jump). Only the guest thread
 // takes them, but clock_update_limit asks for the next one from any thread that
@@ -94,7 +107,7 @@ size_t g_setting_pos;                          // first not yet applied
 // made it between: where the replay parted from its recording. Said once; the replay goes on.
 void parted(const char* what, uint32_t lo, uint32_t hi) {
     static bool said;
-    if (said || g_replay_by_frame) return;
+    if (said || g_replay_by_frame || by_time()) return;
     if (g_poll_seq >= lo && g_poll_seq <= hi) return;
     said = true;
     fprintf(stderr, "[input] the replay has parted from its recording: %s at poll %u (frame %u), recorded between polls %u and %u\n",
@@ -113,8 +126,9 @@ void record(int chan, const PadState& s) {
     if (g_have_last[chan] && same(g_last[chan], s)) return;
     g_last[chan] = s;
     g_have_last[chan] = true;
-    fprintf(g_out, "%u %u %d %d %04X %02X %02X %02X %02X %02X %02X\n", g_poll_seq, gx_frames_submitted(), chan,
-            s.connected ? 1 : 0, s.buttons, s.stick_x, s.stick_y, s.cstick_x, s.cstick_y, s.trig_l, s.trig_r);
+    fprintf(g_out, "%u %u %d %d %04X %02X %02X %02X %02X %02X %02X %llu\n", g_poll_seq, gx_frames_submitted(), chan,
+            s.connected ? 1 : 0, s.buttons, s.stick_x, s.stick_y, s.cstick_x, s.cstick_y, s.trig_l, s.trig_r,
+            (unsigned long long)now_ticks());
     // Flushed per line: the point of the log is to survive whatever happens next.
     fflush(g_out);
 }
@@ -133,9 +147,10 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
     time_t now = time(nullptr);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     rtc_set_base(now);
-    fprintf(g_out, "# gcn-recomp input log v5\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
-    fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
-    fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
+    fprintf(g_out, "# gcn-recomp input log v6\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
+    fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r tick\n");
+    fprintf(g_out, "# (hex but the tick; each line is that channel's state from that pad poll on, and the\n");
+    fprintf(g_out, "#  tick is the poll's virtual time in time-base ticks, decimal)\n");
     fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
     fprintf(g_out, "# pose <kind> <read> <valid> <values...>: what the game's Nth read of that pose saw, from there on\n");
     fprintf(g_out, "# setting <frame> <key> <value>: a setting the game reads, from the end of that submitted frame on\n");
@@ -152,7 +167,7 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
 void input_log_end() {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!g_out) return;
-    fprintf(g_out, "# end %u %u\n", g_poll_seq, gx_frames_submitted());
+    fprintf(g_out, "# end %u %u %llu\n", g_poll_seq, gx_frames_submitted(), (unsigned long long)now_ticks());
     fflush(g_out);
 }
 
@@ -169,6 +184,7 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     char line[2048];
     int version = 1;
     uint32_t end_key = 0;
+    uint64_t end_tick = 0;
     // The poll of the last pad line read, and the jumps and pose records since it, which
     // take the next pad line's poll as the end of their bracket (Jump).
     uint32_t last_key = 0;
@@ -184,9 +200,12 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         if (line[0] == '#') {
             long long epoch;
             unsigned end_poll, end_frame;
+            unsigned long long etick;
             if (sscanf(line, "# gcn-recomp input log v%d", &version) == 1) continue;
             if (sscanf(line, "# epoch %lld", &epoch) == 1) rtc_set_base((time_t)epoch);
-            if (sscanf(line, "# end %u %u", &end_poll, &end_frame) == 2) end_key = version >= 2 ? end_poll : end_frame;
+            const int ends = sscanf(line, "# end %u %u %llu", &end_poll, &end_frame, &etick);
+            if (ends >= 2) end_key = version >= 2 ? end_poll : end_frame;
+            if (ends == 3) end_tick = etick;
             continue;
         }
         if (line[0] == '\n') continue;
@@ -227,7 +246,10 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             continue;
         }
         unsigned key, frame, chan, conn, buttons, sx, sy, cx, cy, l, r;
-        if (version >= 2) {
+        unsigned long long tick = 0;
+        if (version >= 6) {
+            if (sscanf(line, "%u %u %u %u %x %x %x %x %x %x %x %llu", &key, &frame, &chan, &conn, &buttons, &sx, &sy, &cx, &cy, &l, &r, &tick) != 12) continue;
+        } else if (version >= 2) {
             if (sscanf(line, "%u %u %u %u %x %x %x %x %x %x %x", &key, &frame, &chan, &conn, &buttons, &sx, &sy, &cx, &cy, &l, &r) != 11) continue;
         } else {
             if (sscanf(line, "%u %u %u %x %x %x %x %x %x %x", &key, &chan, &conn, &buttons, &sx, &sy, &cx, &cy, &l, &r) != 10) continue;
@@ -235,6 +257,7 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         if (chan > 3) continue;
         Entry e;
         e.key = key;
+        e.tick = tick;
         e.chan = (uint8_t)chan;
         e.s.connected = conn != 0;
         e.s.buttons = (uint16_t)buttons;
@@ -255,8 +278,11 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
     }
     g_replay_last_key = std::max(g_replay.back().key, end_key);
     g_replay_by_frame = version < 2;
+    g_replay_has_ticks = version >= 6;
+    g_replay_last_tick = std::max<uint64_t>(g_replay.back().tick, end_tick);
+    if (const char* e = getenv("GCN_REPLAY_BY_TIME")) g_by_time_wanted = atoi(e) != 0;
     std::stable_sort(g_jumps.begin(), g_jumps.end(), [](const Jump& a, const Jump& b) { return a.at < b.at; });
-    g_next_jump_at = g_jumps.empty() ? UINT64_MAX : g_jumps[0].at;
+    g_next_jump_at = g_jumps.empty() || by_time() ? UINT64_MAX : g_jumps[0].at;
     for (auto& s : g_replay_state) { s = PadState(); s.connected = true; }
     g_replay_loaded = true;
     memcard_out.clear();
@@ -302,7 +328,23 @@ void input_replay_settings(uint32_t frame, void (*fn)(const char* key, const cha
 
 uint64_t input_replay_next_jump_at() { return g_next_jump_at.load(); }
 
+void input_replay_by_time(bool on) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    const bool was = by_time();
+    g_by_time_wanted = on;
+    if (!g_replay_loaded || by_time() == was) return;
+    if (by_time()) {
+        // A jump is keyed by back-edge count, which a guest doing more or less work a second
+        // reaches at another moment; a replay by time makes none.
+        g_next_jump_at = UINT64_MAX;
+        fprintf(stderr, "[input] replaying by virtual time, without the recorded clock jumps\n");
+    } else {
+        g_next_jump_at = g_jump_pos < g_jumps.size() ? g_jumps[g_jump_pos].at : UINT64_MAX;
+    }
+}
+
 uint64_t input_replay_take_jump(uint64_t count) {
+    if (by_time()) return 0;
     if (g_jump_pos >= g_jumps.size() || g_jumps[g_jump_pos].at > count) return 0;
     {
         std::lock_guard<std::mutex> lk(g_mutex);
@@ -315,7 +357,7 @@ uint64_t input_replay_take_jump(uint64_t count) {
 
 bool input_replay_active() {
     std::lock_guard<std::mutex> lk(g_mutex);
-    return g_replay_loaded && replay_key() <= g_replay_last_key;
+    return replay_running();
 }
 
 bool input_pose(const char* kind, bool* valid, float* v, int n) {
@@ -323,7 +365,7 @@ bool input_pose(const char* kind, bool* valid, float* v, int n) {
     PoseChannel& ch = pose_channel(kind);
     ch.reads++;
     bool replayed = false;
-    if (g_replay_loaded && replay_key() <= g_replay_last_key) {
+    if (replay_running()) {
         while (ch.pos < ch.replay.size() && ch.replay[ch.pos].read <= ch.reads) {
             const PoseRecord& r = ch.replay[ch.pos++];
             if (r.read == ch.reads) parted(ch.kind == "eyes" ? "a read of the eyes" : "a read of a hand", r.lo, r.hi);
@@ -364,12 +406,11 @@ bool input_pad_poll(int chan, PadState& s) {
     std::lock_guard<std::mutex> lk(g_mutex);
     bool replayed = false;
     if (g_replay_loaded) {
-        const uint32_t key = replay_key();
-        while (g_replay_pos < g_replay.size() && g_replay[g_replay_pos].key <= key) {
+        while (g_replay_pos < g_replay.size() && entry_due(g_replay[g_replay_pos])) {
             const Entry& e = g_replay[g_replay_pos++];
             g_replay_state[e.chan] = e.s;
         }
-        if (key > g_replay_last_key) {
+        if (!replay_running()) {
             static bool said;
             if (!said) {
                 said = true;

@@ -2925,12 +2925,29 @@ static void present(const EfbCopyCmd& c) {
     }
     const bool in_range = range_lo < 0 || ((int)g_present_count >= range_lo &&
                                            (int)g_present_count <= range_hi);
+    // GCN_DUMP_FRAMES=<file> (presented frame numbers, one per line) dumps exactly those
+    // frames instead: frames of two runs picked from their own logs to show the same moment,
+    // as when a game run at another frame rate is compared with its native one.
+    static const std::vector<uint32_t> picked = [] {
+        std::vector<uint32_t> v;
+        if (const char* path = getenv("GCN_DUMP_FRAMES"))
+            if (FILE* f = fopen(path, "r")) {
+                unsigned n;
+                while (fscanf(f, "%u", &n) == 1) v.push_back(n);
+                fclose(f);
+            }
+        std::sort(v.begin(), v.end());
+        return v;
+    }();
+    const bool dump = g_dump_dir && (picked.empty()
+        ? g_dump_every && in_range && g_present_count % g_dump_every == 0
+        : std::binary_search(picked.begin(), picked.end(), g_present_count));
     if (xfb) {
-        if (g_dump_dir && g_dump_every && in_range && g_present_count % g_dump_every == 0) dump_xfb(*xfb, c.dst_w);
+        if (dump) dump_xfb(*xfb, c.dst_w);
         blit_rect_to_output(xfb->tex, c.dst_w, xfb->h, 0, 0, c.dst_w, xfb->h);
         return;
     }
-    if (g_dump_dir && g_dump_every && in_range && g_present_count % g_dump_every == 0) dump_efb(c);
+    if (dump) dump_efb(c);
     blit_to_output(c, g_efb_color);
 }
 

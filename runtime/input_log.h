@@ -46,6 +46,18 @@ bool input_pad_poll(int chan, PadState& s);
 // Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();
 
+// A poll is any read the guest makes of the SI's pad registers, so the count of them
+// depends on how often the game reads: a game made to run at another frame rate reads
+// more or less often a second, and a replay keyed by poll hands it the inputs per game
+// frame instead of per unit of time. Since version 6 each pad line also carries the
+// poll's virtual time; replaying by time (this, or GCN_REPLAY_BY_TIME=1) applies each
+// change at the first poll at or after that time instead, so a route recorded at one
+// frame rate drives the game at the same instants at another. Exact only at the
+// recording's own rate and work, where polls sharing a time can still split differently;
+// the recorded clock jumps, keyed by back-edge count, are left out. A log older than v6
+// replays by poll whatever is asked.
+void input_replay_by_time(bool on);
+
 // Poses the game's hooks read on the guest thread (vr::hand_pose and vr::eye_views in
 // vr_game.h) are input too: a game that aims from a controller or culls to the viewer's
 // head steers its simulation by them, and a replay without them parts from the recording

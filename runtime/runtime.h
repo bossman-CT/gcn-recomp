@@ -175,6 +175,11 @@ const char* func_containing(uint32_t addr, uint32_t* start);
 
 // ---- hw modules ----
 void vi_init(); uint16_t vi_read16(uint32_t off); void vi_write16(uint32_t off, uint16_t v);
+// Retraces per console field (GCN_VI_RATE, 1 by default): a VI scanning N times as fast, so
+// that a game paced on the retrace runs N times its frame rate. The game scales its own
+// per-frame steps to match (step_set_scale); see docs/diagnostics.md.
+void vi_set_rate(double n);
+double vi_rate();
 void di_init(const char* iso_path); uint32_t di_read32(uint32_t off); void di_write32(uint32_t off, uint32_t v);
 void si_init(); uint32_t si_read32(uint32_t off); void si_write32(uint32_t off, uint32_t v);
 void exi_init(); uint32_t exi_read32(uint32_t off); void exi_write32(uint32_t off, uint32_t v);

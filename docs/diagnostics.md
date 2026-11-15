@@ -33,17 +33,28 @@ up with the virtual time the fast-forward ran ahead.
 Logs recorded before the virtual clock (version 1, keyed by presented frame) still load and
 replay approximately, as they always did.
 
-Pad polls are the SI's own, on a 120 Hz timer of virtual time, not the game's reads, so a
-log keyed by them replays at the same instants on a game patched to run at a different
-frame rate (`GCN_CPU_SCALE`, below): the inputs land at the same virtual times, and what
-differs from there is the game's own doing.
+A poll is any read the guest makes of the SI's pad registers, as well as the SI's own
+120 Hz latch (`si.cpp`), so the count of them depends on how often the game reads: a game
+made to run at twice its frame rate (`GCN_VI_RATE`, below) reads twice as often a second,
+and a log replayed by poll hands it the recorded inputs per game frame -- twice as fast in
+time. (This page said until 2026-11-14 that polls were the SI timer's alone and so
+replayed at the same instants at any frame rate; they never were.) Since version 6 each
+pad line also carries the poll's virtual time, and `GCN_REPLAY_BY_TIME=1` (or
+`input_replay_by_time` from a game's sources) replays by it: each change is applied at
+the first poll at or after the virtual time it was recorded at, so the inputs land at the
+same instants at any frame rate and what differs from there is the game's own doing. A
+replay by time makes none of the recorded clock jumps, which are keyed by back-edge count,
+and is exact only up to polls that share a virtual time; at the recording's own rate,
+replay by poll, the default, stays exact. A log older than v6 replays by poll whatever is
+asked; replaying it once at its own rate with logging on writes a v6 copy.
 
 The log format is text: a header (version, game, start time and its epoch), then one line
 per change of a channel's state --
-`poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r`, in
-hex -- the clock's catch-up jumps where they happened (`jump <back-edge count> <edges>`,
-decimal; see "The clock" below), and, when the run ended in a way the runtime saw (a
-normal exit, a fault, a failed guest check or an interrupt), a final `# end <poll> <frame>`. A replay holds the last
+`poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r tick`,
+in hex but the tick (the poll's virtual time in time-base ticks, decimal; v6) -- the
+clock's catch-up jumps where they happened (`jump <back-edge count> <edges>`, decimal;
+see "The clock" below), and, when the run ended in a way the runtime saw (a normal exit,
+a fault, a failed guest check or an interrupt), a final `# end <poll> <frame> <tick>`. A replay holds the last
 state up to that end before handing over to the live pad; without the marker it hands over
 at the last change, which can be well before where the run stopped, so a log that lacks
 one (a run killed from outside) can be given one by hand. Lines can be edited or written
@@ -138,6 +149,9 @@ it had, so a recording with several players replays as exactly as one with one.
 
 `--hidden --dump-dir=DIR --dump-every=N` runs with the window hidden and writes every Nth
 presented frame as a PNG. `GCN_DUMP_RANGE=a-b` restricts that to a window of frames.
+`GCN_DUMP_FRAMES=<file>` (frame numbers, one per line) writes exactly those frames instead:
+two runs at different frame rates are compared at the same moments by picking, from a log
+of each run's frames and virtual times, the frame each shows at each moment.
 `--headless` runs the guest with no renderer at all. A frame shown widescreen (`--aspect`) is
 dumped stretched to its aspect. `GCN_WIDE_LOG=N` reports, every Nth frame, how far past the
 4:3 frame's sides the game still draws (graphics.md, "Widescreen"); `GCN_WIDE_ANCHOR` and
@@ -398,6 +412,14 @@ the host and the pacer slept at every poll, and either way the game stood still 
 long as it had run. An unpaced run never shows this, since its idle jumps cross any gap at
 no cost, which is why switching mid-run looked safe in the harness.
 
+`GCN_VI_RATE=N` (or `vi_set_rate` from a game's sources; 1 to 8) makes the VI scan a field
+in 1/N of the console's time, so it retraces N times as often. A game that paces itself on
+the retrace at one field a frame cannot go faster than 60 fps on a faster CPU alone; on a
+faster VI it runs N times its rate, and its per-frame steps (below) are then the game's to
+scale. The beam position and the display interrupts follow the shorter field; the SI's
+latch, the audio DMA and every timer stay in real time. The rate can change while the game
+runs, from the next retrace on.
+
 `GCN_CLOCK=host` restores wall-clock time (the ticker thread polls for due events every
 200 µs). `GCN_TIMESCALE=N` paces virtual time at N× real time (0: unpaced; `--fast` on
 the game, and the benchmark's default). `GCN_CLOCKLOG=1` prints once per virtual second how
@@ -583,6 +605,15 @@ left.
   the frames it ran in that directly followed another frame it ran in, which tells a step
   that is only active for part of the window (a countdown runs on consecutive frames) from
   one that fires on events.
+- Two histograms over the same stretch of virtual time, one at the native rate and one at
+  twice it (a replay by time, `GCN_VI_RATE=2`), sort the sites by what drives them: a site
+  the game runs per frame runs twice as often in the second, one driven by time -- the
+  sound library on its DSP interrupt, a timer -- as often in both, and must not be scaled.
+  A writer watch (`GCN_STORE_HIST_PCS`, below) records every store in the window, which
+  slows a run many times over: keep its window short.
+- Integer increments in the SDK are not steps however often they run: the retrace count,
+  taken every other frame, leaves `VIWaitForRetrace` waiting for a change that never
+  comes.
 - `GCN_STORE_HIST_PCS=<file>` (hex addresses, one per line) adds, for every address one of
   those sites wrote, who else wrote it: `[stwr] <addr> <pc>:<count> ...`. That tells a
   value carried from frame to frame (its only writers are steps) from a temporary that
