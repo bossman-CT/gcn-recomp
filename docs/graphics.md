@@ -1124,3 +1124,45 @@ Other limits: the scene is drawn into the same 640 pixels across, so at `--scale
 are stretched by `1/s`. A higher `--scale` covers that. A grab (a copy of part of the frame, put back
 where the game's 4:3 projection says) and a screen-space reflection lookup at the new sides
 read what the game expected to be at those places, not what the wider scene put there.
+
+## Depth peeks
+
+A game can read the EFB's depth from the CPU: a load from the EFB window (`0xC8000000`, x in
+bits 2-11, y in bits 12-21, bit 22 set for Z; the SDK's `GXPeekZ`). Games use it for
+visibility tests, such as whether a light is hidden behind geometry. It returned 0 for every
+pixel, which such a test reads as "hidden". Colour reads (`GXPeekARGB`) still return 0.
+
+The guest thread is up to a few frames ahead of the renderer, and a frame is drawn as one
+batch, so it cannot be handed the EFB as it stands at its read. Instead:
+
+- a read (the first of a run with no command between them, a "group") leaves a `PeekZ` marker
+  in the command stream, through the same queue as view turns and draw tags (`efb_peek`,
+  fifo.cpp), so the front end puts it into the batch at the right place among the draws;
+- where the renderer reaches the marker it draws the EFB's depth into a 640x528 colour target
+  as the three bytes of the 24-bit Z, one sample per hardware pixel whatever the internal scale
+  (the block's middle sample), reads that into a pixel buffer behind a fence, and files it as a
+  `PeekSnapshot` (render.h) at the end of the next batch, by which time the GPU is done with it.
+  That is a small GPU pass and, on the render thread, about 0.3 ms to queue and 0.4 ms to file,
+  and it never waits for the GPU. A depth blit down to 640x528, and a depth read-back, were each
+  tried first and each made the driver wait for the GPU tens of milliseconds;
+- a read is answered from the snapshot of the same group `kPeekLag` (3) frames earlier, taken
+  as the GPU had drawn up to that point of the frame. The guest waits for the snapshot if
+  the renderer is behind (`GCN_STALLS` counts it as finish), which in practice it is not.
+  Before the first `kPeekLag` frames, or for a group the earlier frame did not have, a read is 0.
+- under widescreen the draws are mapped sideways (`render_set_aspect`); the snapshot carries
+  the maps of the scene's draws so far (one per viewport) and a read at guest pixel x is taken
+  where the map put it.
+
+So a read is the depth as the GPU had it, three frames ago: the same test made a few
+frames late, which a light's visibility does not show. It cannot be the current frame's.
+The value is a function of what the guest did and of how frames are drawn, not of timing, so
+a replay repeats it. It does depend on the drawing: at a model's edge the depth at a pixel
+can differ between internal scales, and the widescreen map moves the point read. Replays
+compared at internal scales 1 and 4 stayed identical; at different aspect ratios the state can differ for
+a frame while a test's result is changing, so peers that compare state need the same aspect
+ratio. `GCN_EFB_PEEK=0` turns depth peeks off (a read is 0, as before), which removes the
+dependence. A renderer with no GL depth read-back (ES) and the headless mode have none and
+read 0.
+
+`GCN_PEEKLOG=1` logs each read with its value, each marker with the draw it lies after, the
+render thread's time for each snapshot and any wait the guest made for one.

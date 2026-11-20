@@ -223,8 +223,14 @@ static std::vector<uint8_t> g_skim_out;
 // behind, was building: in the headset, a frame of the world now and then drawn a frame's
 // turn off. Under g_fe_mutex.
 // The game's draw tags (gx::set_draw_tag) go in the same queue, in order with the turns.
-namespace gx { void view_turn_reached(const float q[4]); void draw_tag_reached(uint8_t tag); }
-struct PendingTurn { uint64_t at; float q[4]; int tag = -1; };   // a draw tag when tag >= 0
+namespace gx {
+void view_turn_reached(const float q[4]);
+void draw_tag_reached(uint8_t tag);
+void peek_marker_reached(uint32_t frame, uint32_t group);
+uint32_t peek_lookup(uint32_t frame, uint32_t group, uint32_t x, uint32_t y);
+}
+// A draw tag when tag >= 0, a depth peek's marker when peek (see efb_peek).
+struct PendingTurn { uint64_t at; float q[4]; int tag = -1; bool peek = false; uint32_t peek_frame = 0, peek_group = 0; };
 static std::deque<PendingTurn> g_turns;
 
 // On the front end, before it processes what starts at `at`: the turns set by then.
@@ -237,7 +243,8 @@ static void turns_reached(uint64_t at) {
             t = g_turns.front();
             g_turns.pop_front();
         }
-        if (t.tag >= 0) gx::draw_tag_reached((uint8_t)t.tag);
+        if (t.peek) gx::peek_marker_reached(t.peek_frame, t.peek_group);
+        else if (t.tag >= 0) gx::draw_tag_reached((uint8_t)t.tag);
         else gx::view_turn_reached(t.q);
     }
 }
@@ -426,7 +433,9 @@ static uint32_t cp_consume(const uint8_t* data, uint32_t len, uint32_t* need) {
 }
 
 // Feed bytes to the command processor, handling commands split across chunks.
+static uint64_t g_cp_fed;   // bytes the command processor has been fed, on the guest thread (efb_peek)
 static void cp_feed(const uint8_t* data, uint32_t len) {
+    g_cp_fed += len;
     // GCN_FEED_DUMP=<path>: every byte handed to the command parser, in order.
     static FILE* dump = [] { const char* p = getenv("GCN_FEED_DUMP"); return p ? fopen(p, "wb") : nullptr; }();
     static FILE* index = [] { const char* p = getenv("GCN_FEED_DUMP"); if (!p) return (FILE*)nullptr; std::string s = std::string(p) + ".idx"; return fopen(s.c_str(), "w"); }();
@@ -770,7 +779,65 @@ void pe_write16(uint32_t off, uint16_t v) {
     g_pe_regs[(off & 0x3F) >> 1] = v;
 }
 
-GCN_WEAK uint32_t efb_peek(uint32_t addr) { return 0; }
+// A read of the EFB (the window at 0xC8000000: GXPeekZ, GXPeekARGB). Depth is read back;
+// colour reads 0, as before. The address holds the pixel: x in bits 2-11, y in bits 12-21,
+// and bit 22 set for Z.
+//
+// The hardware gives the EFB as the GPU has drawn it to that point, which the guest, up to
+// a few frames ahead of the renderer, cannot have. So each stretch of reads with no
+// command between them (a "group": the nine samples of one visibility test, say) leaves a
+// marker in the command stream, where the renderer takes a snapshot of the depth as drawn so
+// far; and a read is answered from the snapshot of the same group kPeekLag frames earlier --
+// the same read, a few frames old, which a visibility test (a lens flare's, a light's) does
+// not show. Both the group and the frame are functions of what the guest did, not of timing,
+// so a replay reads the same values. They do depend on how the frames were drawn: the depth
+// at a point differs a hair between internal scales at the edge of a model, and with the
+// widescreen map; a game that kept the answer in state a replay depends on would see it.
+// Nothing before the first kPeekLag frames or a group the earlier frame did not have reads
+// anything but 0.
+static constexpr uint32_t kPeekRing = 16;
+static struct { uint32_t frame = ~0u, groups = 0; } g_peek_ring[kPeekRing];   // groups made per frame
+static uint32_t g_peek_frame = ~0u, g_peek_group;
+static uint64_t g_peek_at = ~0ull;
+
+GCN_WEAK uint32_t efb_peek(uint32_t addr) {
+    if (!(addr & 0x00400000) || !gx::g_renderer_peeks.load(std::memory_order_relaxed)) return 0;
+    const uint32_t x = (addr >> 2) & 0x3FF, y = (addr >> 12) & 0x3FF;
+    const uint32_t frame = gx::g_frames_submitted.load();
+    if (frame != g_peek_frame) {
+        g_peek_frame = frame;
+        g_peek_group = 0;
+        g_peek_at = ~0ull;
+        g_peek_ring[frame % kPeekRing] = {frame, 0};
+    }
+    if (g_cp_fed != g_peek_at) {   // the stream has moved since the last read: a new group
+        g_peek_at = g_cp_fed;
+        const uint32_t group = g_peek_ring[frame % kPeekRing].groups++;
+        g_peek_group = group;
+        if (!fe_threaded()) {
+            gx::peek_marker_reached(frame, group);
+        } else {
+            fe_submit();
+            PendingTurn t;
+            memset(t.q, 0, sizeof(t.q));
+            t.peek = true;
+            t.peek_frame = frame;
+            t.peek_group = group;
+            std::lock_guard<std::mutex> lk(g_fe_mutex);
+            t.at = g_fe_handed;
+            g_turns.push_back(t);
+        }
+    }
+    static const bool peeklog = getenv("GCN_PEEKLOG") != nullptr;
+    uint32_t z = 0;
+    if (frame >= gx::kPeekLag) {
+        const uint32_t then = frame - gx::kPeekLag;
+        const auto& r = g_peek_ring[then % kPeekRing];
+        if (r.frame == then && r.groups) z = gx::peek_lookup(then, std::min(g_peek_group, r.groups - 1), x, y);
+    }
+    if (peeklog) fprintf(stderr, "[peek] f%u group %u z(%u,%u) = %06X\n", frame, g_peek_group, x, y, z);
+    return z;
+}
 GCN_WEAK void efb_poke(uint32_t addr, uint32_t v) {}
 
 void debug_dump_fifo() {

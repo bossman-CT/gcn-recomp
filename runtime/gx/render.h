@@ -154,7 +154,9 @@ struct EyeDrawFacts {
 enum EyeVerdict : int { EyeKeep = 0, EyeHideDraw = 1, EyeHideObject = 2, EyeFlat = 3, EyeScreen = 4, EyeRestore = 5, EyeFacing = 6, EyeLateObject = 7, EyeTrueScale = 8, EyeHideEverywhere = 9, EyeFrameScreen = 10, EyePushOut = 11 };
 using EyeFilter = int (*)(const PixelState& st, const EyeDrawFacts& facts);
 
-enum class CmdType : uint8_t { Draw, EfbCopy, Present };
+// PeekZ: where the game read the EFB's depth (efb_peek); Cmd::first is the guest's frame
+// count then and Cmd::count the read's group within it. See PeekSnapshot.
+enum class CmdType : uint8_t { Draw, EfbCopy, Present, PeekZ };
 
 struct EfbCopyCmd {
     uint32_t src_x, src_y, src_w, src_h;   // EFB rect
@@ -179,6 +181,30 @@ struct EfbCopyCmd {
 // asked for.
 void copy_writeback_done(uint32_t ticket, std::vector<uint8_t>&& bytes);
 extern std::atomic<bool> g_renderer_writes_back;
+
+// Depth peeks. A game reading the EFB's Z by CPU (GXPeekZ, a load from the EFB's address
+// window) wants what the GPU had drawn at that point of its command stream, which the guest
+// thread cannot have: it is up to a few frames ahead of the renderer, and a batch is drawn
+// as a whole frame. So the read is a marker in the stream (CmdType::PeekZ). Where the
+// renderer reaches it, it takes the EFB's depth at hardware resolution -- one sample per
+// hardware pixel, whatever the internal scale -- and hands it over (peek_snapshot_done). The
+// guest's reads are answered from the snapshot of the same read kPeekLag frames earlier, so
+// that the guest never waits for the renderer in practice, and what it reads is a function
+// of what was drawn, not of timing: replays stay exact (see efb_peek in fifo.cpp).
+// `regions` are the widescreen maps (render_set_aspect) the scene's draws were made through,
+// latest first, in guest pixels: where one holds a point, the point is read where the map
+// put it. `depth` is 24-bit Z, rows bottom to top, as GL has them.
+struct PeekRegion { float x0, x1, y0, y1; float s, b; };
+struct PeekSnapshot {
+    uint32_t frame = 0, group = 0;
+    uint32_t w = 0, h = 0;
+    std::vector<uint32_t> depth;
+    std::vector<PeekRegion> regions;
+};
+constexpr uint32_t kPeekLag = 3;
+void peek_snapshot_done(PeekSnapshot&& s);
+// Set by a renderer that makes the snapshots -- without one, a depth read gives 0.
+extern std::atomic<bool> g_renderer_peeks;
 
 struct Cmd {
     CmdType type;

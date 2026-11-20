@@ -1791,6 +1791,77 @@ void copy_writebacks_land(uint32_t frames) {
     }
 }
 
+// Depth peeks (see PeekSnapshot in render.h). The renderer files a snapshot for each marker
+// it reaches (peek_snapshot_done); the guest thread answers a read from the one `kPeekLag`
+// frames older than its own frame (peek_lookup), waiting for it if the renderer has not got
+// there, which in practice it has.
+std::atomic<bool> g_renderer_peeks{false};
+static std::mutex g_peek_mutex;
+static std::condition_variable g_peek_cv;
+static std::deque<PeekSnapshot> g_peek_snaps;   // oldest first
+static bool g_peek_stuck;                       // a wait timed out: the renderer is not making them
+
+void peek_snapshot_done(PeekSnapshot&& s) {
+    std::lock_guard<std::mutex> lk(g_peek_mutex);
+    g_peek_stuck = false;
+    // What the guest can still ask for is within a few frames; the rest is dropped.
+    while (!g_peek_snaps.empty() && g_peek_snaps.front().frame + 4 * kPeekLag < s.frame) g_peek_snaps.pop_front();
+    g_peek_snaps.push_back(std::move(s));
+    g_peek_cv.notify_all();
+}
+
+// On the front end, where the guest's read reached the stream: the renderer snapshots the
+// EFB when it gets here.
+void peek_marker_reached(uint32_t frame, uint32_t group) {
+    Cmd c{};
+    c.type = CmdType::PeekZ;
+    c.first = frame;
+    c.count = group;
+    batch().cmds.push_back(c);
+}
+
+// On the guest thread: the depth, 24 bits as the hardware's Z, at EFB pixel (x, y) in the
+// snapshot of read group `group` of guest frame `frame`. 0 for none: no snapshot yet, or a
+// point outside the EFB.
+uint32_t peek_lookup(uint32_t frame, uint32_t group, uint32_t x, uint32_t y) {
+    std::unique_lock<std::mutex> lk(g_peek_mutex);
+    auto find = [&]() -> const PeekSnapshot* {
+        for (const PeekSnapshot& s : g_peek_snaps)
+            if (s.frame == frame && s.group == group) return &s;
+        return nullptr;
+    };
+    const PeekSnapshot* s = find();
+    if (!s) {
+        if (g_peek_stuck) return 0;
+        StallTimer stall(Stall::Finish);
+        static const bool peeklog = getenv("GCN_PEEKLOG") != nullptr;
+        const auto t0 = std::chrono::steady_clock::now();
+        struct Report {
+            bool on; std::chrono::steady_clock::time_point t0; uint32_t frame;
+            ~Report() {
+                if (on) fprintf(stderr, "[peek] guest waited %.3f ms for the snapshot of frame %u\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), frame);
+            }
+        } report{peeklog, t0, frame};
+        if (!g_peek_cv.wait_for(lk, std::chrono::seconds(2), [&] { return (s = find()) != nullptr; })) {
+            fprintf(stderr, "[peek] no depth for frame %u after 2 s; reading 0 until the renderer catches up\n", frame);
+            g_peek_stuck = true;
+            return 0;
+        }
+    }
+    // The widescreen map the draws at this point were made through: x' = s*x + b in the
+    // EFB's normalised x.
+    float px = (float)x + 0.5f;
+    for (const PeekRegion& r : s->regions)
+        if (px >= r.x0 && px < r.x1 && (float)y >= r.y0 && (float)y < r.y1) {
+            const float n = r.s * (2.0f * px / (float)s->w - 1.0f) + r.b;
+            px = (n + 1.0f) * 0.5f * (float)s->w;
+            break;
+        }
+    const int ix = (int)floorf(px);
+    if (ix < 0 || ix >= (int)s->w || y >= s->h || s->depth.size() < (size_t)s->w * s->h) return 0;
+    return s->depth[(size_t)(s->h - 1 - y) * s->w + ix];
+}
+
 void renderer_efb_copy(uint32_t dest_addr, bool /*unused*/) {
     const uint32_t* bp = g_state.bp;
     uint32_t v = bp[0x52];

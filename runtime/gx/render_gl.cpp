@@ -11,6 +11,9 @@
 #include <cstdlib>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstring>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1089,6 +1092,11 @@ void render_init(float internal_scale) {
     glEnable(GL_CLIP_DISTANCE0 + 5);
 #endif
     g_renderer_writes_back = true;  // see set_copy_writeback in gx.h
+#ifndef GCN_GL_ES
+    // See PeekSnapshot in render.h; ES has no depth read-back. GCN_EFB_PEEK=0 leaves them off,
+    // so a depth read is 0: the value then does not depend on how the frame was drawn.
+    g_renderer_peeks = !(getenv("GCN_EFB_PEEK") && atoi(getenv("GCN_EFB_PEEK")) == 0);
+#endif
     g_vs_hash = hash_str(vs_src.c_str());
     g_vs = compile(GL_VERTEX_SHADER, vs_src);
 #if GCN_HAVE_PROGRAM_BINARY
@@ -4491,10 +4499,207 @@ static void upload_textures(const Batch& b) {
 // happens, which is how the stereo path obtains the textures its eye passes sample.
 // `again` draws a batch this function has just drawn: the textures and vertices are
 // already up, and it is the same frame to the texture cache.
+// ---------------------------------------------------------------------------
+// Depth peeks (PeekSnapshot in render.h). At a CmdType::PeekZ the EFB's depth is drawn into a
+// 640x528 colour target as 24-bit Z in three bytes -- the sample in the middle of each hardware
+// pixel's block, so the scale does not matter to the reader -- and read back into a pixel
+// buffer, which costs the GPU a small pass and the CPU nothing; the fence says when the bytes
+// are there. They are taken off by the end of the next batch, which the GPU has long finished:
+// a frame's worth of work lies between, so the read never stalls the pipeline. (A depth blit
+// down to the hardware's size, and a depth read-back, were each tried first: both made the
+// driver wait for the GPU, tens of milliseconds a read.) Not on ES, which has no
+// GL_DEPTH_COMPONENT read-back.
+// ---------------------------------------------------------------------------
+#ifndef GCN_GL_ES
+static constexpr int kPeekBuffers = 8;
+struct PeekPending {
+    uint32_t frame, group;
+    uint32_t batch;   // g_peek_batch when taken
+    int buffer;
+    GLsync fence;
+    std::vector<PeekRegion> regions;
+};
+static GLuint g_peek_fbo, g_peek_tex, g_peek_pbo[kPeekBuffers], g_peek_prog;
+static GLint g_peek_u_depth, g_peek_u_scale, g_peek_u_rect;
+static bool g_peek_ready, g_peek_failed;
+static std::deque<PeekPending> g_peek_pending;
+static uint32_t g_peek_batch;   // batches drawn so far
+
+// Samples the depth texture where the pixel's block of samples has its middle, as
+// copy_writeback does for colour, and writes it as the three bytes of the 24-bit Z.
+static const char* kPeekFS = GCN_GLSL_VERSION R"(
+in vec2 v_uv;
+uniform sampler2D u_depth;
+uniform float u_scale;
+out vec4 o;
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    ivec2 a = ivec2(floor(vec2(p) * u_scale + 0.5));
+    ivec2 b = ivec2(floor(vec2(p + ivec2(1)) * u_scale + 0.5));
+    float z = texelFetch(u_depth, (a + b) / 2, 0).r;
+    uint zi = min(uint(z * 16777215.0 + 0.5), 16777215u);
+    o = vec4(float((zi >> 16) & 255u), float((zi >> 8) & 255u), float(zi & 255u), 255.0) / 255.0;
+}
+)";
+
+static void peek_init() {
+    g_peek_ready = true;
+    glGenFramebuffers(1, &g_peek_fbo);
+    glGenTextures(1, &g_peek_tex);
+    glBindTexture(GL_TEXTURE_2D, g_peek_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W, EFB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_peek_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_peek_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[peek] depth read-back framebuffer incomplete; depth reads give 0\n");
+        g_peek_failed = true;
+    }
+    GLuint vs = compile(GL_VERTEX_SHADER, glsl_header_with_clip() + kCopyVS);
+    g_peek_prog = link(vs, compile(GL_FRAGMENT_SHADER, kPeekFS));
+    g_peek_u_depth = glGetUniformLocation(g_peek_prog, "u_depth");
+    g_peek_u_scale = glGetUniformLocation(g_peek_prog, "u_scale");
+    g_peek_u_rect = glGetUniformLocation(g_peek_prog, "u_rect");
+    glGenBuffers(kPeekBuffers, g_peek_pbo);
+    for (int i = 0; i < kPeekBuffers; i++) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, g_peek_pbo[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)EFB_W * EFB_H * 4, nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
+}
+
+// The widescreen maps in force where the marker at command `ci` lies: those of the scene's
+// draws before it, one per distinct viewport, latest first. A draw's viewport is where its
+// own guest pixels are, and what the map moved them to is what a read there must follow.
+static void peek_regions(const Batch& b, size_t ci, std::vector<PeekRegion>& out) {
+    if (g_wide_plan.empty() || g_wide_s >= 1.0f) return;
+    for (size_t i = std::min(ci, g_wide_plan.size()); i-- > 0 && out.size() < 8;) {
+        const Cmd& d = b.cmds[i];
+        if (d.type != CmdType::Draw || std::isnan(g_wide_plan[i])) continue;
+        const PixelState& st = b.states[d.state];
+        if ((int)st.proj[6] != 0) continue;   // a 2D draw: the depth is the scene's
+        int xoff, yoff;
+        scissor_offset(st.bp, xoff, yoff);
+        const float hx = fabsf(st.viewport[0]), hy = fabsf(st.viewport[1]);
+        PeekRegion r{st.viewport[3] - xoff - hx, st.viewport[3] - xoff + hx, st.viewport[4] - yoff - hy,
+                     st.viewport[4] - yoff + hy, g_wide_s, g_wide_plan[i]};
+        bool seen = false;
+        for (const PeekRegion& o : out)
+            seen |= o.x0 == r.x0 && o.x1 == r.x1 && o.y0 == r.y0 && o.y1 == r.y1 && o.b == r.b;
+        if (!seen) out.push_back(r);
+    }
+}
+
+// Hands over what is ready: everything from before this batch (the GPU is done with it, so
+// waiting is for the driver's sake only), and of this batch's what the GPU has already done.
+static void peek_publish() {
+    static const bool peeklog = getenv("GCN_PEEKLOG") != nullptr;
+    while (!g_peek_pending.empty()) {
+        PeekPending& p = g_peek_pending.front();
+        const bool older = p.batch < g_peek_batch;
+        const auto t0 = peeklog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const GLenum r = glClientWaitSync(p.fence, GL_SYNC_FLUSH_COMMANDS_BIT, older ? 200000000ull : 0ull);
+        const bool done = r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
+        if (!done) {
+            if (!older) break;
+            fprintf(stderr, "[peek] depth read-back of frame %u not done after 200 ms\n", p.frame);
+        }
+        PeekSnapshot s;
+        s.frame = p.frame;
+        s.group = p.group;
+        s.w = EFB_W;
+        s.h = EFB_H;
+        s.regions = std::move(p.regions);
+        if (done) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, g_peek_pbo[p.buffer]);
+            const uint8_t* m = (const uint8_t*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)EFB_W * EFB_H * 4, GL_MAP_READ_BIT);
+            if (m) {
+                s.depth.resize((size_t)EFB_W * EFB_H);
+                for (size_t i = 0; i < s.depth.size(); i++)
+                    s.depth[i] = (uint32_t)m[i * 4] << 16 | (uint32_t)m[i * 4 + 1] << 8 | m[i * 4 + 2];
+                glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        }
+        glDeleteSync(p.fence);
+        g_peek_pending.pop_front();
+        if (peeklog) fprintf(stderr, "[peek] frame %u group %u filed in %.3f ms (render thread)%s\n", s.frame, s.group, ms_since(t0), done ? "" : ", NOT READY");
+        peek_snapshot_done(std::move(s));
+    }
+}
+
+static void peek_take(const Batch& b, size_t ci) {
+    const Cmd& c = b.cmds[ci];
+    if (!g_peek_ready) peek_init();
+    if (g_peek_failed) {
+        PeekSnapshot none;
+        none.frame = c.first;
+        none.group = c.count;
+        peek_snapshot_done(std::move(none));
+        return;
+    }
+    if ((int)g_peek_pending.size() >= kPeekBuffers) {   // all in flight: wait for the oldest
+        g_peek_batch++;   // so that peek_publish treats everything as older, and waits
+        peek_publish();
+        g_peek_batch--;
+    }
+    int buffer = 0;
+    for (; buffer < kPeekBuffers; buffer++) {
+        bool used = false;
+        for (const PeekPending& p : g_peek_pending) used |= p.buffer == buffer;
+        if (!used) break;
+    }
+    static const bool peeklog = getenv("GCN_PEEKLOG") != nullptr;
+    const auto t0 = peeklog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (peeklog) {
+        size_t before = 0, total = 0;
+        for (size_t i = 0; i < b.cmds.size(); i++) {
+            const bool draw = b.cmds[i].type == CmdType::Draw;
+            total += draw;
+            if (i < ci) before += draw;
+        }
+        fprintf(stderr, "[peek] frame %u group %u taken after %zu of %zu draws\n", c.first, c.count, before, total);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    set_logic_op_off();
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    g_gl_cull = 0;
+    glColorMask(1, 1, 1, 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_peek_fbo);
+    glViewport(0, 0, EFB_W, EFB_H);
+    glUseProgram(g_peek_prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_efb_depth);
+    glBindSampler(0, 0);
+    glUniform1i(g_peek_u_depth, 0);
+    glUniform1f(g_peek_u_scale, g_scale);
+    glUniform4f(g_peek_u_rect, 0.0f, 0.0f, 1.0f, 1.0f);
+    glBindVertexArray(g_copy_vao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_peek_pbo[buffer]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, EFB_W, EFB_H, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    PeekPending p{c.first, c.count, g_peek_batch, buffer, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0), {}};
+    peek_regions(b, ci, p.regions);
+    g_peek_pending.push_back(std::move(p));
+    glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
+    if (peeklog) fprintf(stderr, "[peek] frame %u group %u queued in %.3f ms (render thread)\n", c.first, c.count, ms_since(t0));
+}
+#endif
+
 static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>* leave_out, bool again) {
     const auto t_start = std::chrono::steady_clock::now();
     double ms_tex = 0.0, ms_vbo = 0.0, ms_copy = 0.0;
     if (!again) {
+#ifndef GCN_GL_ES
+        g_peek_batch++;
+#endif
         g_render_frame++;
         const size_t n_dead = g_dead_pending.size();
         evict_textures(b);
@@ -4869,6 +5074,17 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             gl_state_invalidate();
             break;
         }
+        case CmdType::PeekZ:
+#ifndef GCN_GL_ES
+            // Not in the second pass of a stereo pair, which redraws this frame.
+            if (!again) {
+                peek_take(b, ci);
+                glViewport(0, 0, sc(EFB_W), sc(EFB_H));
+                cur_state = UINT32_MAX;
+                gl_state_invalidate();
+            }
+#endif
+            break;
         case CmdType::Present:
             if (do_present) present(c.copy);
             presented = true;
@@ -4883,6 +5099,9 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         fprintf(stderr, "[rt] f%u render %6.2fms (tex %5.2f vbo %5.2f copies %5.2f)  applies %4u  programs %zu\n",
                 g_render_frame, ms_since(t_start), ms_tex, ms_vbo, ms_copy, n_apply, g_programs.size());
     apply_stats_flush("flat", g_render_frame);
+#ifndef GCN_GL_ES
+    if (!g_peek_pending.empty()) peek_publish();
+#endif
     return presented;
 }
 

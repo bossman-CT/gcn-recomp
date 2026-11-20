@@ -686,6 +686,7 @@ so the variants never mix with the real ones).
   as it is raised and acknowledged, with a note when one is raised while the last is
   still pending.
 - `GCN_COPYLOG=1` logs EFB copies; `GCN_GXSTATS=1` prints per-frame GX counts.
+- `GCN_PEEKLOG=1` logs the guest's reads of the EFB's depth and the renderer's snapshots (graphics.md, "Depth peeks"); `GCN_EFB_PEEK=0` turns depth reads off.
 - `--sample` reports once a second which guest functions each guest thread is in, by
   walking the guest's own stack; names come from the game's `symbols.txt`.
 - Build with `-DGCN_TRACE_CALLS=ON` to keep a real guest call stack, printed by the crash
