@@ -88,6 +88,12 @@ void render_set_wide_anchor(float split);
 // fade and stretched over the wider picture instead (default 0.95). GCN_WIDE_FULL
 // overrides it.
 void render_set_wide_full(float full);
+// 2D draws sampling one of these textures (by content hash, as the draw log's `t0=` shows)
+// are never anchored to a side, whatever the split: they stay centred, with the scene.
+// For a marker the game places over a point of the scene (an aiming reticle, a lock-on
+// bracket, a label over a target), which crosses the split as the point does and would
+// otherwise jump, or tear from the rest of its pieces, as it passes. Replaces the list.
+void render_set_wide_centred_textures(const uint64_t* hashes, unsigned count);
 
 // Redirect the finished frame somewhere other than the window framebuffer, e.g. a VR
 // swapchain image. 0 restores the default.

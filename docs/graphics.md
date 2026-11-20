@@ -1098,6 +1098,12 @@ presented. So:
   beyond the split themselves. A panel is a centred 2D draw of triangles lying wholly in its
   viewport, and not across the frame: lines, or sprites reaching past the frame's edges, are
   not drawn on;
+- a game can list textures (`render_set_wide_centred_textures`, by content hash, as the draw
+  log's `t0=` shows) whose draws are never anchored, whatever their position: they stay
+  centred, with the scene. It is for a marker the game places over a point of the scene (an
+  aiming reticle, a lock-on bracket, a label over a target). Such a marker crosses the split
+  as the point does, and by position alone it would jump outward there, its pieces tearing
+  apart where each crosses it;
 - a scissor rect moves with its draw, unless it spans the EFB's width;
 - the off-screen passes (`mark_offscreen_passes`) are left alone, since what they draw is a
   texture;

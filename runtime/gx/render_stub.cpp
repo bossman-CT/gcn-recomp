@@ -16,6 +16,7 @@ void render_set_shader_keys(const void*, size_t) {}
 void render_set_push_out(float) {}
 float render_aspect() { return 4.0f / 3.0f; }
 void render_set_wide_anchor(float) {}
+void render_set_wide_centred_textures(const uint64_t*, unsigned) {}
 void render_set_wide_full(float) {}
 uint32_t present_count() { return 0; }
 }  // namespace gx

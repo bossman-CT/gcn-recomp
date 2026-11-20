@@ -132,6 +132,7 @@ static float quantize_scale(float s) {
 static float g_wide_s = 1.0f;
 static float g_wide_split = 1.0f;     // render_set_wide_anchor; 1 anchors nothing
 static float g_wide_full = 0.95f;     // render_set_wide_full
+static std::vector<uint64_t> g_wide_centred_tex;   // render_set_wide_centred_textures
 static bool g_frame_wide = false;     // the batch being drawn is shown wide
 static bool g_present_wide = false;   // the frame last presented was
 static std::vector<float> g_wide_plan;  // per command: a draw's b, or NAN for as the game drew it
@@ -3851,8 +3852,14 @@ static void wide_plan(const Batch& b) {
         }
         const float f0 = (x0 - cx) / hw, f1 = (x1 - cx) / hw;
         if (!perspective && f0 <= -g_wide_full && f1 >= g_wide_full) continue;
+        // A marker on the scene's own points (its textures are listed) is never anchored.
+        bool centred = false;
+        for (int m = 0; m < 8 && !centred && !g_wide_centred_tex.empty(); m++)
+            if (st.tex_id[m] && std::find(g_wide_centred_tex.begin(), g_wide_centred_tex.end(), render_texture_hash(st.tex_id[m])) != g_wide_centred_tex.end())
+                centred = true;
         float t = 0.0f;
-        if (f1 <= -g_wide_split) t = -(1.0f - s);
+        if (centred) {}
+        else if (f1 <= -g_wide_split) t = -(1.0f - s);
         else if (f0 >= g_wide_split) t = 1.0f - s;
         // A draw lying wholly on a panel kept centred, drawn before it, stays with the panel:
         // the text, cursor and icons of a menu box that crosses the split lie beyond the split
@@ -3864,7 +3871,7 @@ static void wide_plan(const Batch& b) {
                     g_wide_on[i] = p.draw;
                     break;
                 }
-        if (panel && t == 0.0f && y1 > y0) panels.push_back({x0, x1, y0, y1, draw});
+        if (panel && !centred && t == 0.0f && y1 > y0) panels.push_back({x0, x1, y0, y1, draw});
         g_wide_plan[i] = b_for(t);
     }
 }
@@ -3876,6 +3883,9 @@ float render_aspect() { return (4.0f / 3.0f) / g_wide_s; }
 bool render_presented_wide() { return g_present_wide; }
 void render_set_wide_anchor(float split) { g_wide_split = split; }
 void render_set_wide_full(float full) { g_wide_full = full; }
+void render_set_wide_centred_textures(const uint64_t* hashes, unsigned count) {
+    g_wide_centred_tex.assign(hashes, hashes + count);
+}
 
 // Texture ids holding a copy of a whole frame.
 //
