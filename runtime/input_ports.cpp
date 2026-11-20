@@ -375,6 +375,7 @@ void read_raw(int port, Raw& r) {
     if (P.ctl) {
         auto ax = [&](SDL_GameControllerAxis a) { return std::clamp(SDL_GameControllerGetAxis(P.ctl, a) / 32767.0f, -1.0f, 1.0f); };
         r.pad = true;
+        r.playstation = P.type >= 0 && (type_mask("playstation") >> (unsigned)P.type & 1);
         r.lx = ax(SDL_CONTROLLER_AXIS_LEFTX);
         r.ly = -ax(SDL_CONTROLLER_AXIS_LEFTY);
         r.rx = ax(SDL_CONTROLLER_AXIS_RIGHTX);
@@ -510,11 +511,6 @@ void set_filter(void (*fn)(int port, PadState& p)) { g_filter = fn; }
 bool connected(int port) {
     if (port < 0 || port > 3) return false;
     return port == 0 || g_ports[port].ctl || g_ports[port].cfg.always;
-}
-
-int type(int port) {
-    if (port < 0 || port > 3 || !g_ports[port].ctl) return -1;
-    return g_ports[port].type;
 }
 
 std::string describe(int port) {

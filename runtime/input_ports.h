@@ -79,6 +79,9 @@ void run_filters(int port, PadState& p);
 // update; elsewhere it stays empty.
 struct Raw {
     bool pad = false;                      // a game controller drives the port
+    bool playstation = false;              // ... and it is a PlayStation one (any generation), as SDL
+                                           // reports it: behind a launcher's input layer (Steam Input) the
+                                           // real controller's type, where the launcher says what it is
     float lx = 0, ly = 0, rx = 0, ry = 0;  // its sticks, -1 to 1, right and up positive, no dead zone
     bool gyro = false;                     // its gyro, while wanted (below) and it has one
     float gx = 0, gy = 0;                  // degrees a second, right and up positive, after the port's
@@ -105,10 +108,6 @@ void set_raw(int port, const Raw& r);
 bool connected(int port);
 // What drives the port, for a menu or a message: `"<device>" (<type>)`, or "" for nothing.
 std::string describe(int port);
-// The SDL_GameControllerType of the controller on the port, -1 with none (the keyboard alone, or
-// an empty port). Where a launcher's input layer (Steam Input) stands between SDL and the
-// device, SDL reports the real controller's type when the launcher says what it is.
-int type(int port);
 
 // ---- settings ----
 struct SettingInfo {
