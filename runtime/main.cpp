@@ -169,10 +169,18 @@ static void toggle_fullscreen() {
 // F9 or a controller's right stick click: a marker in the input log at the frame on screen
 // (input_log_mark), for a later look at what the player saw there. The GameCube pad has no
 // stick clicks, so the click is free unless controls.txt maps it; F9 goes no further.
+// A second mark within half a second of the last is dropped: one click can arrive twice when
+// two devices report it (a pad and the virtual pad a launcher's input layer adds for it).
 static bool mark_event(const SDL_Event& e) {
     const bool key = e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F9;
     const bool click = e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK;
     if (!key && !click) return false;
+    static Uint32 last = 0;
+    static bool have_last = false;
+    const Uint32 now = SDL_GetTicks();
+    if (have_last && now - last < 500) return key;
+    last = now;
+    have_last = true;
     char text[32];
     if (const int n = input_log_mark(gx::present_count())) snprintf(text, sizeof text, "Marked (%d)", n);
     else snprintf(text, sizeof text, "Not recording: no mark");

@@ -68,6 +68,8 @@ number frame dumps carry, `frame_<present>.png`) and the virtual time. It is a c
 the replayer passes it by, as any older one does: a log with markers replays exactly as it
 would without them, and markers can be added or removed by hand. The GameCube pad has no
 stick clicks, so the click reaches the game only if `controls.txt` maps it to something.
+A second mark within half a second of the last is ignored, since one click can be reported twice when two devices
+see it (a pad and the virtual pad a launcher's input layer adds for it).
 A script can turn the markers into frame dumps: a replay with `GCN_DUMP_TIMES` listing
 times from a few seconds before each marker to a few after (see "Frame dumps").
 
