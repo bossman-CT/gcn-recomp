@@ -512,6 +512,11 @@ bool connected(int port) {
     return port == 0 || g_ports[port].ctl || g_ports[port].cfg.always;
 }
 
+int type(int port) {
+    if (port < 0 || port > 3 || !g_ports[port].ctl) return -1;
+    return g_ports[port].type;
+}
+
 std::string describe(int port) {
     if (port < 0 || port > 3) return "";
     const Port& P = g_ports[port];

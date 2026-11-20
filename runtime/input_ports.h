@@ -105,6 +105,10 @@ void set_raw(int port, const Raw& r);
 bool connected(int port);
 // What drives the port, for a menu or a message: `"<device>" (<type>)`, or "" for nothing.
 std::string describe(int port);
+// The SDL_GameControllerType of the controller on the port, -1 with none (the keyboard alone, or
+// an empty port). Where a launcher's input layer (Steam Input) stands between SDL and the
+// device, SDL reports the real controller's type when the launcher says what it is.
+int type(int port);
 
 // ---- settings ----
 struct SettingInfo {
